@@ -140,10 +140,12 @@ def fetch(session: requests.Session, spec: QuerySpec, market_area: str,
         except (requests.RequestException, ThrottledResponse) as exc:
             last_exc = exc
             # Throttle/shell pages need a longer pause to clear than a network
-            # blip does.
+            # blip does — but cap it: a sustained IP rate-limit won't clear in
+            # seconds, so don't waste minutes per request (the daily run retries
+            # unsettled days anyway).
             base = 4 if isinstance(exc, ThrottledResponse) else 2
             if attempt < config.REQUEST_RETRIES:
-                backoff = base ** attempt
+                backoff = min(base ** attempt, 30)
                 logger.warning(
                     "request failed (attempt %d/%d): %s — retrying in %ds",
                     attempt, config.REQUEST_RETRIES, exc, backoff,
