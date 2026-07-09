@@ -43,6 +43,12 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Scrape
+        # If EPEX 403s from the Actions runner (datacenter IPs are often WAF-
+        # blocked), add an EPEX_PROXY repo secret (e.g. a residential proxy URL)
+        # and uncomment the env block below to route requests through it.
+        # env:
+        #   HTTPS_PROXY: ${{ secrets.EPEX_PROXY }}
+        #   HTTP_PROXY: ${{ secrets.EPEX_PROXY }}
         run: |
           python -m epex_scraper.scrape \
             --data-dir data \
