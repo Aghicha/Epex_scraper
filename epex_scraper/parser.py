@@ -96,6 +96,16 @@ def _cell_text(el) -> str:
     return " ".join(el.get_text(separator=" ", strip=True).split())
 
 
+def _row_resolution(tr) -> int:
+    """Resolution (minutes) of a continuous-table row from its CSS class."""
+    cls = set(tr.get("class", []))
+    if "lvl-2" in cls:
+        return 15
+    if "lvl-1" in cls:
+        return 30
+    return 60
+
+
 def _header_row(table, ncols: int):
     """Return the <thead> row whose <th> count matches the data rows."""
     thead = table.find("thead")
@@ -137,9 +147,23 @@ def parse_market_results(html: str, meta: dict) -> list[dict]:
     else:
         headers = [f"col_{i}" for i in range(ncols)]
 
+    # Continuous pages embed all three resolutions (60/30/15 min) in one table
+    # and hide the non-selected ones via CSS classes (lvl-1 = 30, lvl-2 = 15,
+    # neither = 60); the browser filters client-side. Day-ahead / IDA pages are
+    # already single-resolution. So: if the table mixes levels, keep only the
+    # rows matching the requested product.
+    has_levels = any(
+        {"lvl-1", "lvl-2"} & set(r.get("class", [])) for r in data_rows
+    )
+    target = int(meta.get("product") or 60)
+    selected = [
+        (i, r) for i, r in enumerate(data_rows)
+        if not has_levels or _row_resolution(r) == target
+    ]
+
     delivery_date = meta["delivery_date"]
     records: list[dict] = []
-    for i, row in enumerate(data_rows):
+    for out_index, (i, row) in enumerate(selected):
         cells = row.find_all("td")
         period_label = times[i] if i < len(times) else str(i)
         if not period_label or period_label.strip().lower() in _MISSING:
@@ -154,7 +178,7 @@ def parse_market_results(html: str, meta: dict) -> list[dict]:
             records.append(
                 {
                     **meta,
-                    "period_index": i,
+                    "period_index": out_index,
                     "period_label": period_label,
                     "period_start": period_start,
                     "metric": metric,

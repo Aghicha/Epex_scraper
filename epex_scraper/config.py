@@ -4,64 +4,42 @@ EPEX exposes its public market results at::
 
     https://www.epexspot.com/en/market-results?market_area=...&modality=...&...
 
-A single request is scoped to one
-``(market_area, modality, sub_modality, auction, product, delivery_date)``
-tuple and returns an HTML page containing a results table.
+The available filter values are **context-dependent** (the market areas and
+auction codes offered depend on the chosen modality), and were read directly
+from the site's own filter form. A single request is scoped to one
+``(market_area, modality[, sub_modality][, auction], product, delivery_date)``
+tuple and returns an HTML page with a results table.
 
-To "capture all products, countries and instruments" we enumerate the full
-cartesian product of:
-
-* ``MARKET_AREAS``   - the bidding / delivery zones ("countries")
-* ``QUERY_SPECS``    - the trading products / instruments
-  (Day-Ahead auction, Intraday auctions IDA1/2/3, continuous intraday, ...)
-* ``PRODUCTS``       - the contract resolution (60 / 30 / 15 minutes)
-
-Not every combination exists (e.g. GB has no MRC day-ahead, only GB-DAA).  The
-scraper is deliberately *tolerant*: any combination that returns no table is
-simply skipped, so the enumeration can stay broad without breaking runs.
+To "capture all products, countries and instruments" we enumerate, per
+instrument (:class:`QuerySpec`), only the market areas and products that
+instrument actually offers.  Any combination without data still returns a
+"no data" page and is skipped, so the lists can stay broad.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-# Base endpoint for the public market results.
 BASE_URL = "https://www.epexspot.com/en/market-results"
 
 # ---------------------------------------------------------------------------
-# Market areas ("countries" / bidding zones)
+# Market-area groups ("countries" / bidding zones), per the site's filters.
 # ---------------------------------------------------------------------------
-# Every delivery/bidding zone published on the market-results page. Invalid
-# combinations for a given product are skipped automatically at runtime.
-MARKET_AREAS: list[str] = [
-    "AT",      # Austria
-    "BE",      # Belgium
-    "CH",      # Switzerland
-    "DE-LU",   # Germany - Luxembourg
-    "DK1",     # Denmark 1
-    "DK2",     # Denmark 2
-    "FI",      # Finland
-    "FR",      # France
-    "GB",      # Great Britain
-    "NL",      # Netherlands
-    "NO1",     # Norway 1
-    "NO2",     # Norway 2
-    "NO3",     # Norway 3
-    "NO4",     # Norway 4
-    "NO5",     # Norway 5
-    "PL",      # Poland
-    "SE1",     # Sweden 1
-    "SE2",     # Sweden 2
-    "SE3",     # Sweden 3
-    "SE4",     # Sweden 4
+# Single Day-Ahead Coupling zones (modality=Auction, sub_modality=DayAhead/MRC
+# and the intraday auctions IDA1/2/3).
+SDAC_ZONES: list[str] = [
+    "AT", "BE", "DE-LU", "DK1", "DK2", "FI", "FR", "NL",
+    "NO1", "NO2", "NO3", "NO4", "NO5", "PL", "SE1", "SE2", "SE3", "SE4",
 ]
 
-# ---------------------------------------------------------------------------
-# Contract resolution ("products" in EPEX URL terms)
-# ---------------------------------------------------------------------------
-# 60 = hourly, 30 = half-hourly, 15 = quarter-hourly. Not all areas trade all
-# resolutions; unavailable ones return no table and are skipped.
-PRODUCTS: list[int] = [60, 30, 15]
+# Continuous intraday (SIDC) zones — note "DE" (not "DE-LU") plus CH/EE/LT/LV.
+CONTINUOUS_ZONES: list[str] = [
+    "AT", "BE", "CH", "DE", "DK1", "DK2", "EE", "FI", "FR", "LT", "LV", "NL",
+    "NO1", "NO2", "NO3", "NO4", "NO5", "PL", "SE1", "SE2", "SE3", "SE4",
+]
+
+# Default contract resolutions to try (minutes). Per-spec overrides below.
+PRODUCTS: list[int] = [60, 15]
 
 
 @dataclass(frozen=True)
@@ -70,46 +48,53 @@ class QuerySpec:
 
     Attributes:
         modality: ``Auction`` or ``Continuous``.
-        sub_modality: ``DayAhead`` or ``Intraday``.
-        auction: The auction / coupling code (``MRC``, ``GB-DAA``, ``IDA1`` …).
-            Empty string for continuous trading (no auction).
+        sub_modality: ``DayAhead`` / ``Intraday`` for auctions, or ``None`` for
+            continuous (sending it makes EPEX return a "no data" page).
+        auction: Auction / coupling code (``MRC``, ``GB``, ``CH``, ``IDA1`` …).
+            Empty string for continuous (no auction).
         slug: Short, filesystem-safe identifier used in output paths.
-        trading_offset_days: If not ``None``, ``trading_date`` is sent as
-            ``delivery_date - offset`` days. Day-ahead auctions clear on D-1.
-            ``None`` omits ``trading_date`` and lets the site derive it
-            (appropriate for intraday auctions / continuous).
+        market_areas: Market areas this instrument offers.
+        products: Contract resolutions to request for this instrument.
     """
 
     modality: str
-    sub_modality: str
+    sub_modality: str | None
     auction: str
     slug: str
-    trading_offset_days: int | None = None
-    market_areas: list[str] = field(default_factory=lambda: list(MARKET_AREAS))
+    market_areas: list[str]
+    products: list[int]
 
 
-# The instruments / products to enumerate. Kept broad on purpose — see module
-# docstring. Extend this list to capture additional auctions as EPEX adds them.
+# The instruments to enumerate. Codes/areas taken from the live filter form.
 QUERY_SPECS: list[QuerySpec] = [
     # --- Day-ahead auctions ------------------------------------------------
-    QuerySpec("Auction", "DayAhead", "MRC", "dayahead-mrc", trading_offset_days=1),
-    QuerySpec("Auction", "DayAhead", "GB-DAA", "dayahead-gb", trading_offset_days=1),
-    QuerySpec("Auction", "DayAhead", "CH-DAA", "dayahead-ch", trading_offset_days=1),
-    # --- Intraday auctions (IDA1 / IDA2 / IDA3) ---------------------------
-    QuerySpec("Auction", "Intraday", "IDA1", "intraday-ida1"),
-    QuerySpec("Auction", "Intraday", "IDA2", "intraday-ida2"),
-    QuerySpec("Auction", "Intraday", "IDA3", "intraday-ida3"),
-    # --- Continuous intraday ----------------------------------------------
-    QuerySpec("Continuous", "Intraday", "", "intraday-continuous"),
+    QuerySpec("Auction", "DayAhead", "MRC", "day-ahead", SDAC_ZONES, [60, 15]),
+    QuerySpec("Auction", "DayAhead", "GB", "day-ahead-gb", ["GB"], [60]),
+    QuerySpec("Auction", "DayAhead", "30-call-GB", "day-ahead-gb-30", ["GB"], [30]),
+    QuerySpec("Auction", "DayAhead", "CH", "day-ahead-ch", ["CH"], [60, 15]),
+    # --- Intraday auctions (IDA1 / IDA2 / IDA3, quarter-hourly) ------------
+    QuerySpec("Auction", "Intraday", "IDA1", "intraday-ida1", SDAC_ZONES, [15]),
+    QuerySpec("Auction", "Intraday", "IDA2", "intraday-ida2", SDAC_ZONES, [15]),
+    QuerySpec("Auction", "Intraday", "IDA3", "intraday-ida3", SDAC_ZONES, [15]),
+    QuerySpec("Auction", "Intraday", "CH-IDA1", "intraday-ch-ida1", ["CH"], [15]),
+    QuerySpec("Auction", "Intraday", "CH-IDA2", "intraday-ch-ida2", ["CH"], [15]),
+    QuerySpec("Auction", "Intraday", "GB-IDA1", "intraday-gb-ida1", ["GB"], [60]),
+    QuerySpec("Auction", "Intraday", "GB-IDA2", "intraday-gb-ida2", ["GB"], [60]),
+    # --- Continuous intraday (SIDC) — no sub_modality, no auction ----------
+    QuerySpec("Continuous", None, "", "continuous", CONTINUOUS_ZONES, [60, 30, 15]),
 ]
+
+# All market areas across instruments (for CLI filtering / display).
+MARKET_AREAS: list[str] = sorted(
+    {a for spec in QUERY_SPECS for a in spec.market_areas}
+)
 
 
 # ---------------------------------------------------------------------------
 # HTTP behaviour
 # ---------------------------------------------------------------------------
-# EPEX sits behind a WAF that 403s non-browser User-Agents, so we present a
-# current Chrome UA. Keep it roughly in sync with the sec-ch-ua hints in
-# client._browser_headers().
+# A browser User-Agent avoids the WAF 403 that non-browser clients get. Keep it
+# roughly current.
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"

@@ -27,27 +27,27 @@ logger = logging.getLogger(__name__)
 # Leading context columns, then hours, then metrics (appended in a stable order).
 _LEAD_COLUMNS = ["delivery_date", "market_area", "hours", "period_start"]
 
-# Preferred left-to-right metric order; anything else is appended alphabetically.
+# Preferred left-to-right metric order (matches EPEX's own column order:
+# price metrics first for continuous, then volumes; day-ahead only has the
+# volume/price tail). Anything unknown is appended alphabetically.
 _METRIC_ORDER = [
+    "low", "high", "last", "weight_avg", "id_full", "id_1", "id_3",
     "buy_volume", "sell_volume", "volume", "price",
-    "low", "high", "last", "weight_avg",
-    "id_full", "id1", "id3", "id_index",
 ]
 
 # Human-readable column names, matching EPEX's own labels.
 _METRIC_LABEL = {
+    "low": "Low",
+    "high": "High",
+    "last": "Last",
+    "weight_avg": "Weight Avg",
+    "id_full": "ID Full",
+    "id_1": "ID1",
+    "id_3": "ID3",
     "buy_volume": "Buy Volume",
     "sell_volume": "Sell Volume",
     "volume": "Volume",
     "price": "Price",
-    "low": "Low",
-    "high": "High",
-    "last": "Last",
-    "weight_avg": "Weighted Avg",
-    "id_full": "ID Full",
-    "id1": "ID1",
-    "id3": "ID3",
-    "id_index": "ID Index",
 }
 
 

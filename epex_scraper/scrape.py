@@ -46,8 +46,9 @@ def run(args: argparse.Namespace) -> int:
     raw_dir = Path(args.save_raw) if args.save_raw else None
 
     specs = _select_specs(args.specs)
-    areas = args.market_areas or config.MARKET_AREAS
-    products = args.products or config.PRODUCTS
+    # Optional CLI filters; when unset, each spec's own areas/products are used.
+    area_filter = set(args.market_areas) if args.market_areas else None
+    product_filter = set(args.products) if args.products else None
     delivery_dates = _delivery_dates(today, args.days_back, args.days_forward)
 
     if args.user_agent:
@@ -57,8 +58,8 @@ def run(args: argparse.Namespace) -> int:
     started = datetime.now(timezone.utc)
 
     logger.info(
-        "run start: %d specs x %d areas x %d products x %d days (today=%s)",
-        len(specs), len(areas), len(products), len(delivery_dates), today,
+        "run start: %d specs x %d days (today=%s)",
+        len(specs), len(delivery_dates), today,
     )
 
     consecutive_forbidden = 0
@@ -67,11 +68,14 @@ def run(args: argparse.Namespace) -> int:
     for spec in specs:
         if aborted:
             break
-        spec_areas = [a for a in areas if a in spec.market_areas]
+        spec_areas = [a for a in spec.market_areas
+                      if area_filter is None or a in area_filter]
+        spec_products = [p for p in spec.products
+                         if product_filter is None or p in product_filter]
         for market_area in spec_areas:
             if aborted:
                 break
-            for product in products:
+            for product in spec_products:
                 if aborted:
                     break
                 for delivery_date in delivery_dates:

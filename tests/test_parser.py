@@ -49,6 +49,25 @@ def test_parses_real_dom_structure():
     assert price["unit"] == "€/MWh"
 
 
+def test_continuous_resolution_filtering():
+    html = (FIXTURES / "continuous_sample.html").read_text(encoding="utf-8")
+    # The page embeds all resolutions; the parser keeps only the requested one.
+    counts = {}
+    for product in (60, 30, 15):
+        meta = {**_meta(), "modality": "Continuous", "sub_modality": None,
+                "auction": "", "product": product}
+        recs = parse_market_results(html, meta)
+        counts[product] = len({r["period_index"] for r in recs})
+    assert counts == {60: 1, 30: 2, 15: 4}
+
+    # 60min keeps the hourly row; metrics include the continuous-only columns.
+    meta = {**_meta(), "modality": "Continuous", "sub_modality": None,
+            "auction": "", "product": 60}
+    recs = parse_market_results(html, meta)
+    assert {r["period_label"] for r in recs} == {"00 - 01"}
+    assert {"low", "high", "buy_volume"} == {r["metric"] for r in recs}
+
+
 def test_no_data_page_returns_empty():
     html = '<div class="no-data-section"><p class="no-data-text">No data</p></div>'
     assert parse_market_results(html, _meta()) == []

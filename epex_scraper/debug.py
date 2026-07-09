@@ -7,7 +7,7 @@ parser would extract. Use this to understand why a combination yields no data.
 
 Example::
 
-    python -m epex_scraper.debug --specs dayahead-mrc --market-areas DE-LU \\
+    python -m epex_scraper.debug --specs day-ahead --market-areas DE-LU \\
         --products 60 --delivery-date 2026-07-08
 
 Paste its (short) output when reporting coverage problems.
@@ -50,8 +50,8 @@ def _report(html: str, meta: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--specs", default="dayahead-mrc",
-                   help="single instrument slug (default: dayahead-mrc)")
+    p.add_argument("--specs", default="day-ahead",
+                   help="single instrument slug (default: day-ahead)")
     p.add_argument("--market-areas", default="DE-LU", help="single market area")
     p.add_argument("--products", type=int, default=60, help="resolution (default: 60)")
     p.add_argument("--delivery-date", type=date.fromisoformat,

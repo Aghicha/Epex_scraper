@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date, timedelta
+from datetime import date
 
 import requests
 
@@ -24,25 +24,23 @@ class AccessForbidden(Exception):
 
 def build_params(spec: QuerySpec, market_area: str, delivery_date: date,
                  product: int) -> dict[str, str]:
-    """Build the query-string parameters for a single market-results request."""
+    """Build the query-string parameters for a single market-results request.
+
+    Only the parameters an instrument actually uses are sent: continuous has no
+    ``sub_modality`` or ``auction`` (sending ``sub_modality`` makes EPEX return
+    a "no data" page), and the auction code is omitted when empty.
+    """
     params: dict[str, str] = {
         "market_area": market_area,
-        "auction": spec.auction,
         "modality": spec.modality,
-        "sub_modality": spec.sub_modality,
         "product": str(product),
         "data_mode": "table",
         "delivery_date": delivery_date.isoformat(),
-        # The remaining params exist in the canonical URL; sending them empty
-        # keeps the request shape close to what a browser sends.
-        "underlying_year": "",
-        "technology": "",
-        "period": "",
-        "production_period": "",
     }
-    if spec.trading_offset_days is not None:
-        trading = delivery_date - timedelta(days=spec.trading_offset_days)
-        params["trading_date"] = trading.isoformat()
+    if spec.sub_modality:
+        params["sub_modality"] = spec.sub_modality
+    if spec.auction:
+        params["auction"] = spec.auction
     return params
 
 

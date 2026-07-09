@@ -4,10 +4,11 @@ A self-contained daily cron scraper for the public
 [EPEX SPOT market results](https://www.epexspot.com/en/market-results).
 
 It captures **all market areas (countries), trading products and instruments**,
-normalises them to a tidy/long format, and stores them as **deduplicated,
-per-delivery-date CSV files committed straight into this repository** by a
-GitHub Actions cron job. EPEX only keeps ~3 days of data online; running daily
-turns that rolling window into a permanent, versioned archive.
+reshapes each into the same **wide table EPEX shows on the site**, and stores
+them as **deduplicated, per-delivery-date CSV files committed straight into this
+repository** by a GitHub Actions cron job. EPEX only keeps ~3 days of data
+online; running daily turns that rolling window into a permanent, versioned
+archive.
 
 ## How it works
 
@@ -28,15 +29,27 @@ python -m epex_scraper.scrape
 
 ### What gets captured
 
-| Dimension | Values | Config |
-|-----------|--------|--------|
-| **Countries / market areas** | AT, BE, CH, DE-LU, DK1/2, FI, FR, GB, NL, NO1–5, PL, SE1–4 | `MARKET_AREAS` |
-| **Products / instruments** | Day-ahead (MRC, GB-DAA, CH-DAA), Intraday auctions (IDA1/2/3), Intraday continuous | `QUERY_SPECS` |
-| **Resolution** | 60 / 30 / 15 minutes | `PRODUCTS` |
-| **Delivery dates** | rolling window around today (default −2 … +2) | `--days-back` / `--days-forward` |
+The valid market areas and auction codes are **context-dependent** (they differ
+per modality) and were read from EPEX's own filter form, so each instrument
+only enumerates the areas/resolutions it actually offers:
 
-Every combination is attempted; combinations that don't exist (e.g. GB has no
-MRC day-ahead) simply return no table and are skipped. See
+| Instrument (`slug`) | Auction | Market areas | Resolutions |
+|---|---|---|---|
+| Day-ahead SDAC (`day-ahead`) | `MRC` | AT, BE, DE-LU, DK1/2, FI, FR, NL, NO1–5, PL, SE1–4 | 60, 15 |
+| GB day-ahead (`day-ahead-gb`, `-gb-30`) | `GB`, `30-call-GB` | GB | 60 / 30 |
+| CH day-ahead (`day-ahead-ch`) | `CH` | CH | 60, 15 |
+| Intraday auctions (`intraday-ida1/2/3`) | `IDA1/2/3` | SDAC zones | 15 |
+| CH / GB intraday auctions | `CH-IDA1/2`, `GB-IDA1/2` | CH / GB | 15 / 60 |
+| Continuous intraday (`continuous`) | – | AT, BE, CH, DE, DK1/2, EE, FI, FR, LT, LV, NL, NO1–5, PL, SE1–4 | 60, 30, 15 |
+
+Notes:
+* Day-ahead uses **`DE-LU`**; continuous uses **`DE`** — different zone sets.
+* Continuous embeds all three resolutions in one page and hides the unselected
+  ones via CSS; the parser filters to the requested resolution by row class.
+* Continuous carries extra columns (Low, High, Last, Weight Avg, ID Full, ID1,
+  ID3) alongside Buy/Sell Volume and Volume.
+
+Combinations without data return a no-data page and are skipped. See
 [`epex_scraper/config.py`](epex_scraper/config.py) to widen or narrow the scope.
 
 ### Storage layout & deduplication
@@ -48,7 +61,7 @@ unit is one file:
 data/<product>/<market_area>/<delivery_date>_<resolution>min.csv
 ```
 
-e.g. `data/dayahead-mrc/DE-LU/2026-07-09_60min.csv`.
+e.g. `data/day-ahead/DE-LU/2026-07-09_60min.csv`.
 
 * Each delivery day maps to exactly one file, so re-scraping the same day just
   rewrites the same path — history never duplicates.
@@ -80,14 +93,14 @@ pip install -r requirements.txt
 python -m epex_scraper.scrape --data-dir data
 
 # Narrow scope while testing
-python -m epex_scraper.scrape --specs dayahead-mrc --market-areas DE-LU,FR \
+python -m epex_scraper.scrape --specs day-ahead --market-areas DE-LU,FR \
     --products 60 --days-back 1 --days-forward 1
 
 # Backfill a specific historical "today" (only works while EPEX still serves it)
 python -m epex_scraper.scrape --today 2026-07-08
 
 # Keep raw HTML for debugging the parser
-python -m epex_scraper.scrape --save-raw raw/ --specs dayahead-mrc \
+python -m epex_scraper.scrape --save-raw raw/ --specs day-ahead \
     --market-areas DE-LU --products 60 --days-back 0 --days-forward 0
 ```
 
@@ -98,11 +111,11 @@ Run `python -m epex_scraper.scrape --help` for the full list.
 ## Diagnosing missing data (coverage)
 
 If a product/market yields no file, inspect one combination with the debug tool.
-It prints every table EPEX returned, whether the parser found a time column, and
-how many records it extracted:
+It prints the page size, the Hours list length, the values-table shape, and how
+many records the parser extracted:
 
 ```bash
-python -m epex_scraper.debug --specs dayahead-mrc --market-areas DE-LU \
+python -m epex_scraper.debug --specs day-ahead --market-areas DE-LU \
     --products 60 --delivery-date 2026-07-08 --save-raw /tmp/epex.html
 ```
 
@@ -149,9 +162,8 @@ against a fixture, so they need no network access.
 EPEX sits behind a WAF/bot filter. If you see repeated
 `403 Client Error: Forbidden`:
 
-* **Browser headers are already sent.** The client uses a real Chrome
-  `User-Agent`, `Sec-Fetch-*`/`sec-ch-ua` hints and warms up session cookies by
-  loading the landing page first. 403s are **not retried** (retrying only
+* **A browser User-Agent is already sent** (plus a `Referer`), which avoids the
+  WAF 403 that non-browser clients get. 403s are **not retried** (retrying only
   hammers the WAF), and the run **aborts fast** after `--max-forbidden`
   consecutive 403s (default 20) instead of grinding for an hour.
 * **Try a different User-Agent** if EPEX rotates its rules:
