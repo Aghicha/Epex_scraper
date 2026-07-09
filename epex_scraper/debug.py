@@ -18,30 +18,28 @@ from __future__ import annotations
 import argparse
 import logging
 from datetime import date, datetime, timezone
-from io import StringIO
 
-import pandas as pd
+from bs4 import BeautifulSoup
 
 from . import client, config
-from .parser import _find_time_labels, _flatten_columns, parse_market_results
+from .parser import parse_market_results
 
 logger = logging.getLogger("epex_scraper.debug")
 
 
 def _report(html: str, meta: dict) -> None:
-    try:
-        tables = pd.read_html(StringIO(html))
-    except ValueError:
-        print("  no <table> elements found on the page")
-        return
-    print(f"  {len(tables)} table(s) on the page:")
-    for i, df in enumerate(tables):
-        df = df.copy()
-        df.columns = _flatten_columns(df)
-        found = _find_time_labels(df)
-        marker = "TIME-COLUMN ✓" if found else "no time column"
-        cols = ", ".join(str(c) for c in df.columns)[:120]
-        print(f"    [{i}] shape={df.shape} [{marker}] cols: {cols}")
+    soup = BeautifulSoup(html, "lxml")
+    times = soup.select(".js-table-times ul li")
+    values = soup.select_one(".js-table-values table") or soup.select_one("table.table-01")
+    print(f"  html size: {len(html)} bytes")
+    print(f"  hours list (.js-table-times li): {len(times)} entries")
+    if values is None:
+        print("  values table (.js-table-values table): NOT FOUND")
+    else:
+        tbody = values.find("tbody")
+        rows = tbody.find_all("tr", recursive=False) if tbody else []
+        ncols = len(rows[0].find_all("td")) if rows else 0
+        print(f"  values table: {len(rows)} data rows x {ncols} cols")
     records = parse_market_results(html, meta)
     print(f"  parser extracted {len(records)} records")
     if records:

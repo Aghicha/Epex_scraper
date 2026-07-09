@@ -115,7 +115,8 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 )
 REQUEST_TIMEOUT = 30  # seconds
-REQUEST_RETRIES = 3
+REQUEST_RETRIES = 4
 # Seconds to sleep between requests. Be a good citizen — EPEX is a shared,
-# public resource and its terms restrict usage to internal purposes.
-REQUEST_SLEEP = 1.5
+# public resource and its terms restrict usage to internal purposes — and it
+# throttles bursts, returning tiny placeholder pages, so don't go too fast.
+REQUEST_SLEEP = 2.0

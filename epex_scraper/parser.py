@@ -1,41 +1,49 @@
 """Parse EPEX market-results HTML into long records.
 
-The market-results page renders its data as HTML ``<table>`` elements, and the
-exact DOM varies by product (day-ahead vs. continuous, hourly vs.
-quarter-hourly). The parser therefore identifies the *results* table by the one
-signal every product shares: a **time column** whose cells look like
-``00:00 - 00:15`` / ``00 - 01``.
+The results widget does **not** render as a single HTML table. Its real markup
+(verified against the live site) is::
 
-* Among all tables on the page, it prefers the richest one that has such a time
-  column (or time-like row index / sibling label table). This both selects the
-  correct table and yields the ``Hours`` labels.
-* Every cell is emitted as the original ``value_raw`` string *and* a best-effort
-  parsed ``value`` float, so nothing is lost if a number-format assumption is
-  wrong.
+    <div class="custom-tables 60min">
+      <div class="fixed-column js-table-times">          <!-- the Hours -->
+        <span class="fixed-head-column">Hours</span>
+        <ul><li><a>00 - 01</a></li> ... </ul>
+      </div>
+      <div class="js-table-values">
+        <table class="table-01 ...">
+          <thead>
+            ... Baseload / Peakload summary rows ...
+            <tr><th>Buy Volume (MWh)</th><th>Sell Volume (MWh)</th>
+                <th>Volume (MWh)</th><th>Price (€/MWh)</th></tr>   <!-- headers -->
+          </thead>
+          <tbody>
+            <tr><td>25,670.2</td><td>28,398.7</td><td>28,398.7</td><td>114.92</td></tr>
+            ...                                                    <!-- one row / period -->
+          </tbody>
+        </table>
+      </div>
+    </div>
 
-Output is a list of flat long records (one per period × metric); the storage
-layer pivots them into the wide, EPEX-like table.
+So the Hours live in a ``<ul>`` (not a table) and the values in a table whose
+``<thead>`` mixes a summary block with the real column headers.  We therefore
+parse with BeautifulSoup: Hours from the ``js-table-times`` list, headers from
+the ``<thead>`` row whose column count matches the ``<tbody>`` rows, and values
+from ``<tbody>``, aligning rows to Hours by position.  This structure is shared
+by every product (day-ahead, intraday auctions, continuous), only the set of
+value columns differs.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from io import StringIO
 
-import pandas as pd
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
 _MISSING = {"", "-", "–", "—", "n/a", "na", "n.a.", "null", "none", "nan"}
 _TIME_RE = re.compile(r"(\d{1,2}):(\d{2})")
 _HOUR_RE = re.compile(r"^\s*(\d{1,2})\b")
-# A time label: "00:00 - 00:15", "00 - 01", or a bare clock time "00:00".
-# Deliberately does NOT match bare integers like "0"/"1" (row indices).
-_LABEL_RE = re.compile(
-    r"^\s*\d{1,2}(:\d{2})?\s*[-–—]\s*\d{1,2}(:\d{2})?\s*$"
-    r"|^\s*\d{1,2}:\d{2}\s*$"
-)
 
 
 def _clean_number(raw: object) -> float | None:
@@ -53,30 +61,6 @@ def _clean_number(raw: object) -> float | None:
         return float(m.group(0))
     except ValueError:
         return None
-
-
-def _flatten_columns(df: pd.DataFrame) -> list[str]:
-    """Flatten (possibly multi-level) column headers to unique, clean strings."""
-    raw: list[str] = []
-    for col in df.columns:
-        if isinstance(col, tuple):
-            parts = [str(p) for p in col if p and not str(p).startswith("Unnamed")]
-            name = " ".join(dict.fromkeys(parts))
-        else:
-            name = "" if str(col).startswith("Unnamed") else str(col)
-        raw.append(name.strip())
-
-    cols: list[str] = []
-    seen: dict[str, int] = {}
-    for i, name in enumerate(raw):
-        base = name or f"col_{i}"
-        if base in seen:
-            seen[base] += 1
-            base = f"{base}_{seen[base]}"
-        else:
-            seen[base] = 0
-        cols.append(base)
-    return cols
 
 
 def _split_unit(header: str) -> tuple[str, str | None]:
@@ -107,94 +91,65 @@ def _period_start(label: str, delivery_date) -> str | None:
     return f"{delivery_date.isoformat()}T{hour:02d}:{minute:02d}:00"
 
 
-def _label_score(values) -> int:
-    """How many entries look like time labels."""
-    vals = [str(v) for v in values if not _is_blank(v)]
-    return sum(1 for v in vals if _LABEL_RE.match(v))
+def _cell_text(el) -> str:
+    """Collapse an element's text (joining <br>-separated parts with a space)."""
+    return " ".join(el.get_text(separator=" ", strip=True).split())
 
 
-def _numeric_score(df: pd.DataFrame) -> int:
-    """Number of columns that are mostly numeric."""
-    n = 0
-    for col in df.columns:
-        parsed = df[col].map(_clean_number)
-        if parsed.notna().sum() >= max(2, len(df) // 2):
-            n += 1
-    return n
-
-
-def _find_time_labels(df: pd.DataFrame):
-    """Return (labels, metric_columns) if this table has a time column/index.
-
-    Looks at each column and the row index; returns ``None`` if nothing in the
-    table looks like a series of time labels.
-    """
-    threshold = max(2, len(df) // 2)
-    for col in df.columns:
-        if _label_score(df[col].tolist()) >= threshold:
-            labels = df[col].tolist()
-            metrics = [c for c in df.columns if c != col]
-            return labels, metrics
-    # Fall back to the row index (EPEX sometimes puts Hours in the index).
-    if _label_score(list(df.index)) >= threshold:
-        return list(df.index), list(df.columns)
-    return None
+def _header_row(table, ncols: int):
+    """Return the <thead> row whose <th> count matches the data rows."""
+    thead = table.find("thead")
+    if thead is None:
+        return None
+    match = None
+    for tr in thead.find_all("tr"):
+        ths = tr.find_all("th")
+        if len(ths) == ncols:
+            match = ths  # keep the last matching row (the real column headers)
+    return match
 
 
 def parse_market_results(html: str, meta: dict) -> list[dict]:
     """Extract long-format records from a market-results HTML page."""
-    try:
-        tables = [t for t in pd.read_html(StringIO(html)) if not t.empty]
-    except ValueError:
-        logger.debug("no <table> elements for %s", meta.get("source_url"))
+    soup = BeautifulSoup(html, "lxml")
+
+    times = [
+        _cell_text(li)
+        for li in soup.select(".js-table-times ul li")
+    ]
+
+    table = soup.select_one(".js-table-values table") or soup.select_one("table.table-01")
+    if table is None:
+        logger.debug("no values table for %s", meta.get("source_url"))
         return []
-    if not tables:
+    tbody = table.find("tbody")
+    if tbody is None:
+        return []
+    data_rows = [tr for tr in tbody.find_all("tr", recursive=False)]
+    data_rows = [r for r in data_rows if r.find_all("td")]
+    if not data_rows:
         return []
 
-    flat = []
-    for df in tables:
-        df = df.copy()
-        df.columns = _flatten_columns(df)
-        flat.append(df)
-
-    # Prefer the richest table that carries a time column (the results table).
-    candidates = []
-    for df in flat:
-        found = _find_time_labels(df)
-        if found:
-            labels, metrics = found
-            candidates.append((_numeric_score(df), df, labels, metrics))
-
-    if candidates:
-        candidates.sort(key=lambda t: t[0], reverse=True)
-        _, values, labels, metric_cols = candidates[0]
+    ncols = len(data_rows[0].find_all("td"))
+    header_ths = _header_row(table, ncols)
+    if header_ths:
+        headers = [_cell_text(th) for th in header_ths]
     else:
-        # No time column anywhere: try a sibling label table, else give up
-        # rather than emit a meaningless integer-indexed table.
-        best = max(flat, key=_numeric_score)
-        if _numeric_score(best) == 0:
-            return []
-        labels = _sibling_labels(flat, len(best))
-        if labels is None:
-            logger.debug("no time labels found for %s", meta.get("source_url"))
-            return []
-        values, metric_cols = best, list(best.columns)
+        headers = [f"col_{i}" for i in range(ncols)]
 
     delivery_date = meta["delivery_date"]
     records: list[dict] = []
-    for i, (_, row) in enumerate(values.reset_index(drop=True).iterrows()):
-        label = labels[i] if i < len(labels) else i
-        if _is_blank(label):
-            continue
-        period_label = str(label).strip()
-        # Skip aggregate rows (Baseload / Peakload / totals) that lack a time.
-        if not _LABEL_RE.match(period_label):
+    for i, row in enumerate(data_rows):
+        cells = row.find_all("td")
+        period_label = times[i] if i < len(times) else str(i)
+        if not period_label or period_label.strip().lower() in _MISSING:
             continue
         period_start = _period_start(period_label, delivery_date)
-        for col in metric_cols:
-            metric, unit = _split_unit(str(col))
-            raw = row[col]
-            if _is_blank(raw):
+        for j, td in enumerate(cells):
+            header = headers[j] if j < len(headers) else f"col_{j}"
+            metric, unit = _split_unit(header)
+            raw = _cell_text(td)
+            if raw.lower() in _MISSING:
                 continue
             records.append(
                 {
@@ -204,26 +159,8 @@ def parse_market_results(html: str, meta: dict) -> list[dict]:
                     "period_start": period_start,
                     "metric": metric,
                     "unit": unit,
-                    "value_raw": str(raw).strip(),
+                    "value_raw": raw,
                     "value": _clean_number(raw),
                 }
             )
     return records
-
-
-def _sibling_labels(tables: list[pd.DataFrame], n_rows: int):
-    for df in tables:
-        if len(df) != n_rows:
-            continue
-        for col in df.columns:
-            if _label_score(df[col].tolist()) >= max(2, n_rows // 2):
-                return df[col].tolist()
-    return None
-
-
-def _is_blank(value: object) -> bool:
-    if value is None:
-        return True
-    if isinstance(value, float) and pd.isna(value):
-        return True
-    return str(value).strip().lower() in _MISSING

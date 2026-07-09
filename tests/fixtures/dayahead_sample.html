@@ -2,35 +2,43 @@
 <html>
 <head><title>Market Results</title></head>
 <body>
-<!-- A decoy nav table with no time column — must NOT be chosen. -->
-<table class="nav">
-  <thead><tr><th>Link</th><th>Count</th></tr></thead>
-  <tbody>
-    <tr><td>Day-Ahead</td><td>10</td></tr>
-    <tr><td>Intraday</td><td>20</td></tr>
-  </tbody>
-</table>
-
-<div class="market-results">
-  <table class="table-01">
-    <thead>
-      <tr>
-        <th>Hours</th>
-        <th>Buy Volume (MWh)</th>
-        <th>Sell Volume (MWh)</th>
-        <th>Volume (MWh)</th>
-        <th>Price (&euro;/MWh)</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr><td>Baseload</td><td>0.0</td><td>0.0</td><td>0.0</td><td>133.20</td></tr>
-      <tr><td>00:00 - 00:15</td><td>0.0</td><td>9.2</td><td>9.2</td><td>131.92</td></tr>
-      <tr><td>00:15 - 00:30</td><td>0.0</td><td>5.3</td><td>5.3</td><td>133.53</td></tr>
-      <tr><td>00:30 - 00:45</td><td>0.0</td><td>0.0</td><td>0.0</td><td>138.65</td></tr>
-      <tr><td>00:45 - 01:00</td><td>0.0</td><td>0.0</td><td>0.0</td><td>130.97</td></tr>
-      <tr><td>01:00 - 01:15</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>
-    </tbody>
-  </table>
+<div class="table-container">
+  <h2>Auction &gt; Day-Ahead &gt; SDAC &gt; 60min index &gt; DE-LU &gt; 08 July 2026</h2>
+  <div class="custom-tables 60min">
+    <!-- Hours live in a <ul>, NOT a table -->
+    <div class="fixed-column js-table-times">
+      <span class="fixed-head-column">Hours</span>
+      <ul>
+        <li class="child no-children"><a href="#">00 - 01</a></li>
+        <li class="child impair no-children"><a href="#">01 - 02</a></li>
+        <li class="child no-children"><a href="#">02 - 03</a></li>
+      </ul>
+    </div>
+    <div class="js-table-values">
+      <table data-head="08.07.26" class="table-01 table-length-1">
+        <thead>
+          <tr class="white"><th colspan="8"></th></tr>
+          <!-- summary block: a 2-column header + Baseload/Peakload (must be ignored) -->
+          <tr><th>Index</th><th>Price <br><span>(&euro;/MWh)</span></th></tr>
+          <tr class="flex-row white"><th>Baseload</th><th><div class="flex"><span>98.96</span></div></th></tr>
+          <tr class="flex-row"><th>Peakload</th><th><div class="flex"><span>67.72</span></div></th></tr>
+          <tr class="white"><th colspan="8"></th></tr>
+          <!-- the real hourly column headers (4 cols, matches tbody) -->
+          <tr>
+            <th>Buy Volume<br><span>(MWh)</span></th>
+            <th>Sell Volume<br><span>(MWh)</span></th>
+            <th>Volume<br><span>(MWh)</span></th>
+            <th>Price<br><span>(&euro;/MWh)</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="child"><td>25,670.2</td><td>28,398.7</td><td>28,398.7</td><td>114.92</td></tr>
+          <tr class="child impair"><td>25,768.3</td><td>27,754.2</td><td>27,754.2</td><td>115.85</td></tr>
+          <tr class="child"><td>-</td><td>-</td><td>-</td><td>111.76</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 </body>
 </html>

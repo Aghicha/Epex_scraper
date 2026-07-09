@@ -108,15 +108,21 @@ python -m epex_scraper.debug --specs dayahead-mrc --market-areas DE-LU \
 
 Typical causes of an empty result:
 
-* **404 / genuinely no data** — that market doesn't trade that product/resolution
-  (expected; skipped).
+* **404 / genuine no-data** — that market doesn't trade that product/resolution
+  on that day. EPEX serves a page with a `no-data-section`; the parser returns
+  no rows (expected, and *not* retried).
 * **403** — see *Troubleshooting 403* below.
-* **`no time column` on every table** — EPEX changed the results-table markup.
-  The saved `--save-raw` HTML shows the new structure; adjust the time-label
-  detection in [`epex_scraper/parser.py`](epex_scraper/parser.py).
+* **Throttling** — under load EPEX intermittently returns a tiny placeholder
+  page or a table-less JS shell (neither the results table nor a no-data
+  message). The client detects these (`is_valid_page`) and **retries with
+  backoff**; raise `--sleep` if you still see `throttle/shell` warnings on big
+  runs.
+* **`values table … NOT FOUND` with a real-size page** — EPEX changed the
+  results markup. The saved `--save-raw` HTML shows the new structure; adjust
+  the selectors in [`epex_scraper/parser.py`](epex_scraper/parser.py).
 
-The run's per-product tallies (`written` / `unchanged` / `empty` / `forbidden` /
-`error`) are logged as the final `run summary` line and saved to
+The run's tallies (`written` / `unchanged` / `empty` / `forbidden` / `error`)
+are logged as the final `run summary` line and saved to
 `data/_manifest/last_run.json`.
 
 ## The cron job
@@ -166,13 +172,13 @@ down".
 
 * **Terms of use** — EPEX publishes this data for internal use; commercial
   redistribution requires their approval. The scraper rate-limits itself
-  (`--sleep`, default 1.5 s) to stay a polite consumer. Review EPEX's terms
-  before publishing the archive.
-* **Parser robustness** — the market-results DOM differs across products and
-  changes over time. The parser is heuristic (it picks the richest table and
-  keeps raw values) rather than pinned to fixed columns. If EPEX changes its
-  layout, run with `--save-raw` and adjust
-  [`epex_scraper/parser.py`](epex_scraper/parser.py); the stored `value_raw`
-  column means earlier data stays usable regardless.
+  (`--sleep`, default 2 s) to stay a polite consumer and avoid throttling.
+  Review EPEX's terms before publishing the archive.
+* **Parser** — the results widget renders Hours in a `<ul>` and values in a
+  separate `<table>` (verified against the live site); the parser reads both
+  with BeautifulSoup and aligns them by position, so it works across day-ahead,
+  intraday auctions and continuous. It keeps `value_raw` alongside the parsed
+  `value`. If EPEX changes its markup, run with `--save-raw` and adjust the
+  selectors in [`epex_scraper/parser.py`](epex_scraper/parser.py).
 * **Auction codes** — `QUERY_SPECS` lists the known instrument codes. Broadening
   it is safe: unknown/invalid combinations are skipped automatically.
