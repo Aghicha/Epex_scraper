@@ -50,6 +50,8 @@ def run(args: argparse.Namespace) -> int:
     products = args.products or config.PRODUCTS
     delivery_dates = _delivery_dates(today, args.days_back, args.days_forward)
 
+    if args.user_agent:
+        config.USER_AGENT = args.user_agent
     session = client.make_session()
     stats: Counter[str] = Counter()
     started = datetime.now(timezone.utc)
@@ -59,10 +61,18 @@ def run(args: argparse.Namespace) -> int:
         len(specs), len(areas), len(products), len(delivery_dates), today,
     )
 
+    consecutive_forbidden = 0
+    aborted = False
     for spec in specs:
+        if aborted:
+            break
         spec_areas = [a for a in areas if a in spec.market_areas]
         for market_area in spec_areas:
+            if aborted:
+                break
             for product in products:
+                if aborted:
+                    break
                 for delivery_date in delivery_dates:
                     path = storage.partition_path(
                         data_dir, spec.slug, market_area, product, delivery_date
@@ -79,14 +89,37 @@ def run(args: argparse.Namespace) -> int:
                     )
                     stats[outcome] += 1
 
+                    # Circuit breaker: if EPEX blocks us (403) many times in a
+                    # row, stop early instead of hammering the WAF for an hour.
+                    if outcome == "forbidden":
+                        consecutive_forbidden += 1
+                        if consecutive_forbidden >= args.max_forbidden:
+                            logger.error(
+                                "aborting: %d consecutive 403s — EPEX is refusing "
+                                "requests (bot/WAF block or blocked source IP)",
+                                consecutive_forbidden,
+                            )
+                            aborted = True
+                            break
+                    else:
+                        consecutive_forbidden = 0
+
     stats["duration_s"] = int((datetime.now(timezone.utc) - started).total_seconds())
     _report(stats, started, today, data_dir, args)
 
-    # Fail the job if we attempted fetches but every single one errored — that
-    # signals EPEX is unreachable / blocked rather than "no data today".
-    attempted = stats["written"] + stats["unchanged"] + stats["empty"] + stats["error"]
+    # Fail loudly if EPEX blocked us or every request errored — that is a real
+    # problem to fix, not "no data today".
+    attempted = (stats["written"] + stats["unchanged"] + stats["empty"]
+                 + stats["error"] + stats["forbidden"])
+    if aborted or (attempted > 0 and stats["forbidden"] == attempted):
+        logger.error(
+            "run failed: %d forbidden, %d errors out of %d attempts. "
+            "See the README 'Troubleshooting 403' section.",
+            stats["forbidden"], stats["error"], attempted,
+        )
+        return 2
     if attempted > 0 and stats["error"] == attempted:
-        logger.error("all %d fetch attempts failed", attempted)
+        logger.error("all %d fetch attempts failed (network)", attempted)
         return 1
     return 0
 
@@ -100,6 +133,11 @@ def _scrape_one(session, spec: QuerySpec, market_area: str, product: int,
     )
     try:
         html = client.fetch(session, spec, market_area, delivery_date, product)
+    except client.AccessForbidden:
+        logger.warning(
+            "403 forbidden %s %s p%s %s", spec.slug, market_area, product, delivery_date
+        )
+        return "forbidden"
     except Exception as exc:  # network exhausted retries
         logger.warning(
             "fetch error %s %s p%s %s: %s",
@@ -180,6 +218,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="comma-separated instrument slugs (default: all)")
     p.add_argument("--sleep", type=float, default=config.REQUEST_SLEEP,
                    help="seconds to sleep between requests (default: %(default)s)")
+    p.add_argument("--max-forbidden", type=int, default=20,
+                   help="abort after this many consecutive 403s (default: 20)")
+    p.add_argument("--user-agent",
+                   help="override the browser User-Agent sent to EPEX")
     p.add_argument("--save-raw", metavar="DIR",
                    help="also dump raw HTML responses to DIR (for debugging)")
     p.add_argument("--today", type=date.fromisoformat,

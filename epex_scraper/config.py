@@ -107,10 +107,12 @@ QUERY_SPECS: list[QuerySpec] = [
 # ---------------------------------------------------------------------------
 # HTTP behaviour
 # ---------------------------------------------------------------------------
-# A descriptive UA is polite and less likely to be blocked than the default.
+# EPEX sits behind a WAF that 403s non-browser User-Agents, so we present a
+# current Chrome UA. Keep it roughly in sync with the sec-ch-ua hints in
+# client._browser_headers().
 USER_AGENT = (
-    "epex-scraper/0.1 (+https://github.com/aghicha/epex_scraper; "
-    "public market data archival)"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 )
 REQUEST_TIMEOUT = 30  # seconds
 REQUEST_RETRIES = 3

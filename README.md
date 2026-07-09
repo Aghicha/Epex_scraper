@@ -116,6 +116,30 @@ python -m pytest -q
 The tests exercise the HTML parser and the dedup/idempotency logic offline
 against a fixture, so they need no network access.
 
+## Troubleshooting 403 (Forbidden)
+
+EPEX sits behind a WAF/bot filter. If you see repeated
+`403 Client Error: Forbidden`:
+
+* **Browser headers are already sent.** The client uses a real Chrome
+  `User-Agent`, `Sec-Fetch-*`/`sec-ch-ua` hints and warms up session cookies by
+  loading the landing page first. 403s are **not retried** (retrying only
+  hammers the WAF), and the run **aborts fast** after `--max-forbidden`
+  consecutive 403s (default 20) instead of grinding for an hour.
+* **Try a different User-Agent** if EPEX rotates its rules:
+  `--user-agent "Mozilla/5.0 … Chrome/126.0.0.0 …"`.
+* **Blocked source IP (most common in CI).** WAFs frequently block datacenter
+  IP ranges — including GitHub Actions (Azure) runners — so requests that work
+  from your laptop 403 from the cron. If the run 403s from Actions but not
+  locally, route through a residential/rotating proxy: the client honours the
+  standard `HTTPS_PROXY` / `HTTP_PROXY` environment variables. In the workflow,
+  add a proxy secret and set it in the `Scrape` step's `env:`.
+* Increase `--sleep` to be gentler if you suspect rate-based blocking.
+
+The run exits with code **2** when it is blocked (vs **1** for pure network
+failure), so a failed cron clearly distinguishes "we're blocked" from "EPEX was
+down".
+
 ## Notes & caveats
 
 * **Terms of use** — EPEX publishes this data for internal use; commercial
