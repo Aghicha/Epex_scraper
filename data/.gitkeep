@@ -1,0 +1,2 @@
+# Scraped market-results files are committed under this directory,
+# partitioned as data/<instrument>/<market_area>/p<product>/<delivery_date>.csv
