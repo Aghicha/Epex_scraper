@@ -39,39 +39,37 @@ Every combination is attempted; combinations that don't exist (e.g. GB has no
 MRC day-ahead) simply return no table and are skipped. See
 [`epex_scraper/config.py`](epex_scraper/config.py) to widen or narrow the scope.
 
-### Deduplication
+### Storage layout & deduplication
 
-The dedup unit is a single file:
+Files are organised **per product, then per market, then per day** — the dedup
+unit is one file:
 
 ```
-data/<instrument>/<market_area>/p<resolution>/<delivery_date>.csv
+data/<product>/<market_area>/<delivery_date>_<resolution>min.csv
 ```
+
+e.g. `data/dayahead-mrc/DE-LU/2026-07-09_60min.csv`.
 
 * Each delivery day maps to exactly one file, so re-scraping the same day just
   rewrites the same path — history never duplicates.
-* Writes are **idempotent**: if freshly scraped data equals what's on disk
-  (ignoring the `scraped_at` timestamp), the file is left untouched, so
-  unchanged days produce **no git diff and no commit**.
-* Days that are already stored **and** older than `--settle-days` (default 2)
-  are not re-fetched at all — day-ahead results are final once published.
+* Writes are **idempotent**: identical content is not rewritten, so unchanged
+  days produce **no git diff and no commit**.
+* Days already stored **and** older than `--settle-days` (default 2) are not
+  re-fetched at all — day-ahead results are final once published.
 
-### Output schema (long / tidy)
+### Output format (wide — mirrors the EPEX table)
 
-One row per `(delivery period, metric)`:
+**One row per delivery period**, exactly like the table on the website:
 
-| column | example |
-|--------|---------|
-| `market_area` | `DE-LU` |
-| `modality` / `sub_modality` / `auction` | `Auction` / `DayAhead` / `MRC` |
-| `product` | `60` |
-| `delivery_date` / `trading_date` | `2026-07-09` / `2026-07-08` |
-| `period_index` / `period_label` / `period_start` | `0` / `00 - 01` / `2026-07-09T00:00:00` |
-| `metric` / `unit` | `price` / `€/MWh` |
-| `value` / `value_raw` | `45.67` / `45.67` |
-| `source_url` / `scraped_at` | the request URL / UTC ISO timestamp |
+| delivery_date | market_area | hours | Buy Volume (MWh) | Sell Volume (MWh) | Volume (MWh) | Price (€/MWh) | period_start |
+|---|---|---|---|---|---|---|---|
+| 2026-07-09 | DE-LU | 00:00 - 00:15 | 0.0 | 9.2 | 9.2 | 131.92 | 2026-07-09T00:00:00 |
+| 2026-07-09 | DE-LU | 00:15 - 00:30 | 0.0 | 5.3 | 5.3 | 133.53 | 2026-07-09T00:15:00 |
 
-Both the parsed `value` and the original `value_raw` string are stored, so no
-information is lost even if a locale/number-format assumption is off.
+The metric columns are whatever that product exposes, in EPEX's own order —
+day-ahead / intraday auctions show Buy/Sell Volume, Volume and Price; continuous
+intraday adds Low / High / Last / Weighted Avg / ID indices. `market_area`,
+product and resolution are also encoded in the file path (partition-key style).
 
 ## Running locally
 
@@ -96,6 +94,30 @@ python -m epex_scraper.scrape --save-raw raw/ --specs dayahead-mrc \
 Key flags: `--days-back`, `--days-forward`, `--settle-days`, `--market-areas`,
 `--products`, `--specs`, `--sleep`, `--save-raw`, `--today`, `--log-level`.
 Run `python -m epex_scraper.scrape --help` for the full list.
+
+## Diagnosing missing data (coverage)
+
+If a product/market yields no file, inspect one combination with the debug tool.
+It prints every table EPEX returned, whether the parser found a time column, and
+how many records it extracted:
+
+```bash
+python -m epex_scraper.debug --specs dayahead-mrc --market-areas DE-LU \
+    --products 60 --delivery-date 2026-07-08 --save-raw /tmp/epex.html
+```
+
+Typical causes of an empty result:
+
+* **404 / genuinely no data** — that market doesn't trade that product/resolution
+  (expected; skipped).
+* **403** — see *Troubleshooting 403* below.
+* **`no time column` on every table** — EPEX changed the results-table markup.
+  The saved `--save-raw` HTML shows the new structure; adjust the time-label
+  detection in [`epex_scraper/parser.py`](epex_scraper/parser.py).
+
+The run's per-product tallies (`written` / `unchanged` / `empty` / `forbidden` /
+`error`) are logged as the final `run summary` line and saved to
+`data/_manifest/last_run.json`.
 
 ## The cron job
 
