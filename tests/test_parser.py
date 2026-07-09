@@ -8,50 +8,70 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 def _meta():
     return {
-        "market_area": "DE-LU",
-        "modality": "Auction",
-        "sub_modality": "DayAhead",
-        "auction": "MRC",
-        "product": 60,
-        "delivery_date": date(2026, 7, 9),
-        "trading_date": "2026-07-08",
-        "source_url": "https://example/test",
+        "market_area": "DE-LU", "modality": "Auction", "sub_modality": "DayAhead",
+        "auction": "MRC", "product": 60, "delivery_date": date(2026, 7, 9),
+        "trading_date": "2026-07-08", "source_url": "https://example/test",
         "scraped_at": "2026-07-09T00:00:00+00:00",
     }
 
 
 def test_clean_number_variants():
     assert _clean_number("1,234.5") == 1234.5
+    assert _clean_number("25,670.2") == 25670.2
     assert _clean_number("-5.20") == -5.2
-    assert _clean_number("45.67") == 45.67
+    assert _clean_number("114.92") == 114.92
     assert _clean_number("-") is None
     assert _clean_number("") is None
     assert _clean_number(None) is None
 
 
-def test_parse_dayahead_table():
+def test_parses_real_dom_structure():
     html = (FIXTURES / "dayahead_sample.html").read_text(encoding="utf-8")
     records = parse_market_results(html, _meta())
 
-    # 3 populated periods x 4 metrics = 12 (4th period is all "-", skipped).
-    assert len(records) == 12
+    # periods 0 and 1 have 4 metrics; period 2 has only price (others are "-").
+    assert len(records) == 9
 
-    first = records[0]
-    assert first["market_area"] == "DE-LU"
-    assert first["period_index"] == 0
-    assert first["period_label"] == "00 - 01"
+    # Hours come from the <ul>, not integer indices, and the Baseload/Peakload
+    # summary block is ignored.
+    labels = [r["period_label"] for r in records]
+    assert "00 - 01" in labels
+    assert "Baseload" not in labels and "Peakload" not in labels
+
+    first = next(r for r in records if r["period_label"] == "00 - 01")
     assert first["period_start"] == "2026-07-09T00:00:00"
 
-    prices = {r["period_index"]: r["value"] for r in records if r["metric"] == "price"}
-    assert prices[0] == 45.67
-    assert prices[2] == -5.20  # negative prices preserved
+    p0 = {r["metric"]: r["value"] for r in records if r["period_index"] == 0}
+    assert p0 == {"buy_volume": 25670.2, "sell_volume": 28398.7,
+                  "volume": 28398.7, "price": 114.92}
 
-    # Units and metric names are extracted from the headers.
-    metrics = {r["metric"] for r in records}
-    assert {"buy_volume", "sell_volume", "volume", "price"} <= metrics
-    price_rec = next(r for r in records if r["metric"] == "price")
-    assert price_rec["unit"] in ("€/MWh", "€/MWh")
+    price = next(r for r in records if r["metric"] == "price")
+    assert price["unit"] == "€/MWh"
 
 
-def test_parse_no_table_returns_empty():
-    assert parse_market_results("<html><body>No data</body></html>", _meta()) == []
+def test_continuous_resolution_filtering():
+    html = (FIXTURES / "continuous_sample.html").read_text(encoding="utf-8")
+    # The page embeds all resolutions; the parser keeps only the requested one.
+    counts = {}
+    for product in (60, 30, 15):
+        meta = {**_meta(), "modality": "Continuous", "sub_modality": None,
+                "auction": "", "product": product}
+        recs = parse_market_results(html, meta)
+        counts[product] = len({r["period_index"] for r in recs})
+    assert counts == {60: 1, 30: 2, 15: 4}
+
+    # 60min keeps the hourly row; metrics include the continuous-only columns.
+    meta = {**_meta(), "modality": "Continuous", "sub_modality": None,
+            "auction": "", "product": 60}
+    recs = parse_market_results(html, meta)
+    assert {r["period_label"] for r in recs} == {"00 - 01"}
+    assert {"low", "high", "buy_volume"} == {r["metric"] for r in recs}
+
+
+def test_no_data_page_returns_empty():
+    html = '<div class="no-data-section"><p class="no-data-text">No data</p></div>'
+    assert parse_market_results(html, _meta()) == []
+
+
+def test_empty_page_returns_empty():
+    assert parse_market_results("<html><body>nothing</body></html>", _meta()) == []

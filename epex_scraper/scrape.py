@@ -46,8 +46,9 @@ def run(args: argparse.Namespace) -> int:
     raw_dir = Path(args.save_raw) if args.save_raw else None
 
     specs = _select_specs(args.specs)
-    areas = args.market_areas or config.MARKET_AREAS
-    products = args.products or config.PRODUCTS
+    # Optional CLI filters; when unset, each spec's own areas/products are used.
+    area_filter = set(args.market_areas) if args.market_areas else None
+    product_filter = set(args.products) if args.products else None
     delivery_dates = _delivery_dates(today, args.days_back, args.days_forward)
 
     if args.user_agent:
@@ -57,20 +58,24 @@ def run(args: argparse.Namespace) -> int:
     started = datetime.now(timezone.utc)
 
     logger.info(
-        "run start: %d specs x %d areas x %d products x %d days (today=%s)",
-        len(specs), len(areas), len(products), len(delivery_dates), today,
+        "run start: %d specs x %d days (today=%s)",
+        len(specs), len(delivery_dates), today,
     )
 
     consecutive_forbidden = 0
+    consecutive_throttled = 0
     aborted = False
     for spec in specs:
         if aborted:
             break
-        spec_areas = [a for a in areas if a in spec.market_areas]
+        spec_areas = [a for a in spec.market_areas
+                      if area_filter is None or a in area_filter]
+        spec_products = [p for p in spec.products
+                         if product_filter is None or p in product_filter]
         for market_area in spec_areas:
             if aborted:
                 break
-            for product in products:
+            for product in spec_products:
                 if aborted:
                     break
                 for delivery_date in delivery_dates:
@@ -89,10 +94,12 @@ def run(args: argparse.Namespace) -> int:
                     )
                     stats[outcome] += 1
 
-                    # Circuit breaker: if EPEX blocks us (403) many times in a
-                    # row, stop early instead of hammering the WAF for an hour.
+                    # Circuit breakers: if EPEX blocks (403) or throttles us
+                    # many times in a row, stop early instead of grinding for
+                    # an hour. Unsettled days are re-fetched on the next run.
                     if outcome == "forbidden":
                         consecutive_forbidden += 1
+                        consecutive_throttled = 0
                         if consecutive_forbidden >= args.max_forbidden:
                             logger.error(
                                 "aborting: %d consecutive 403s — EPEX is refusing "
@@ -101,21 +108,35 @@ def run(args: argparse.Namespace) -> int:
                             )
                             aborted = True
                             break
+                    elif outcome == "throttled":
+                        consecutive_throttled += 1
+                        consecutive_forbidden = 0
+                        if consecutive_throttled >= args.max_throttled:
+                            logger.error(
+                                "aborting: %d consecutive throttle responses — EPEX "
+                                "is rate-limiting this IP; try again later or raise "
+                                "--sleep. Unsettled days retry on the next run.",
+                                consecutive_throttled,
+                            )
+                            aborted = True
+                            break
                     else:
                         consecutive_forbidden = 0
+                        consecutive_throttled = 0
 
     stats["duration_s"] = int((datetime.now(timezone.utc) - started).total_seconds())
     _report(stats, started, today, data_dir, args)
 
-    # Fail loudly if EPEX blocked us or every request errored — that is a real
-    # problem to fix, not "no data today".
+    # Fail loudly if EPEX blocked/throttled us or every request errored — that
+    # is a real problem to fix, not "no data today".
     attempted = (stats["written"] + stats["unchanged"] + stats["empty"]
-                 + stats["error"] + stats["forbidden"])
-    if aborted or (attempted > 0 and stats["forbidden"] == attempted):
+                 + stats["error"] + stats["forbidden"] + stats["throttled"])
+    blocked = stats["forbidden"] + stats["throttled"]
+    if aborted or (attempted > 0 and blocked == attempted):
         logger.error(
-            "run failed: %d forbidden, %d errors out of %d attempts. "
-            "See the README 'Troubleshooting 403' section.",
-            stats["forbidden"], stats["error"], attempted,
+            "run failed: %d forbidden, %d throttled, %d errors out of %d "
+            "attempts. See the README 'Troubleshooting' section.",
+            stats["forbidden"], stats["throttled"], stats["error"], attempted,
         )
         return 2
     if attempted > 0 and stats["error"] == attempted:
@@ -138,6 +159,11 @@ def _scrape_one(session, spec: QuerySpec, market_area: str, product: int,
             "403 forbidden %s %s p%s %s", spec.slug, market_area, product, delivery_date
         )
         return "forbidden"
+    except client.ThrottledResponse:
+        logger.warning(
+            "throttled %s %s p%s %s", spec.slug, market_area, product, delivery_date
+        )
+        return "throttled"
     except Exception as exc:  # network exhausted retries
         logger.warning(
             "fetch error %s %s p%s %s: %s",
@@ -220,6 +246,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="seconds to sleep between requests (default: %(default)s)")
     p.add_argument("--max-forbidden", type=int, default=20,
                    help="abort after this many consecutive 403s (default: 20)")
+    p.add_argument("--max-throttled", type=int, default=15,
+                   help="abort after this many consecutive throttle responses "
+                        "(default: 15)")
     p.add_argument("--user-agent",
                    help="override the browser User-Agent sent to EPEX")
     p.add_argument("--save-raw", metavar="DIR",

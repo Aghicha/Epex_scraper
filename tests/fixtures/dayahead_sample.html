@@ -2,24 +2,43 @@
 <html>
 <head><title>Market Results</title></head>
 <body>
-<div class="market-results">
-  <table class="table-01">
-    <thead>
-      <tr>
-        <th></th>
-        <th>Buy Volume (MWh)</th>
-        <th>Sell Volume (MWh)</th>
-        <th>Volume (MWh)</th>
-        <th>Price (&euro;/MWh)</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr><td>00 - 01</td><td>1,234.5</td><td>1,200.0</td><td>2,434.5</td><td>45.67</td></tr>
-      <tr><td>01 - 02</td><td>1,100.0</td><td>1,050.5</td><td>2,150.5</td><td>42.10</td></tr>
-      <tr><td>02 - 03</td><td>980.0</td><td>1,000.0</td><td>1,980.0</td><td>-5.20</td></tr>
-      <tr><td>03 - 04</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>
-    </tbody>
-  </table>
+<div class="table-container">
+  <h2>Auction &gt; Day-Ahead &gt; SDAC &gt; 60min index &gt; DE-LU &gt; 08 July 2026</h2>
+  <div class="custom-tables 60min">
+    <!-- Hours live in a <ul>, NOT a table -->
+    <div class="fixed-column js-table-times">
+      <span class="fixed-head-column">Hours</span>
+      <ul>
+        <li class="child no-children"><a href="#">00 - 01</a></li>
+        <li class="child impair no-children"><a href="#">01 - 02</a></li>
+        <li class="child no-children"><a href="#">02 - 03</a></li>
+      </ul>
+    </div>
+    <div class="js-table-values">
+      <table data-head="08.07.26" class="table-01 table-length-1">
+        <thead>
+          <tr class="white"><th colspan="8"></th></tr>
+          <!-- summary block: a 2-column header + Baseload/Peakload (must be ignored) -->
+          <tr><th>Index</th><th>Price <br><span>(&euro;/MWh)</span></th></tr>
+          <tr class="flex-row white"><th>Baseload</th><th><div class="flex"><span>98.96</span></div></th></tr>
+          <tr class="flex-row"><th>Peakload</th><th><div class="flex"><span>67.72</span></div></th></tr>
+          <tr class="white"><th colspan="8"></th></tr>
+          <!-- the real hourly column headers (4 cols, matches tbody) -->
+          <tr>
+            <th>Buy Volume<br><span>(MWh)</span></th>
+            <th>Sell Volume<br><span>(MWh)</span></th>
+            <th>Volume<br><span>(MWh)</span></th>
+            <th>Price<br><span>(&euro;/MWh)</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="child"><td>25,670.2</td><td>28,398.7</td><td>28,398.7</td><td>114.92</td></tr>
+          <tr class="child impair"><td>25,768.3</td><td>27,754.2</td><td>27,754.2</td><td>115.85</td></tr>
+          <tr class="child"><td>-</td><td>-</td><td>-</td><td>111.76</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 </body>
 </html>

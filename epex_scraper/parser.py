@@ -1,49 +1,58 @@
-"""Parse EPEX market-results HTML into tidy/long records.
+"""Parse EPEX market-results HTML into long records.
 
-The market-results page renders its data as HTML ``<table>`` elements.  The
-exact DOM varies by product (day-ahead vs. continuous, hourly vs.
-quarter-hourly), so this parser is intentionally *heuristic and defensive*
-rather than tied to fixed column indices:
+The results widget does **not** render as a single HTML table. Its real markup
+(verified against the live site) is::
 
-* It picks the "values" table as the one carrying the most numeric data.
-* It aligns each value row with a period/time label (from a sibling label
-  column when present, otherwise the table's own first column / index).
-* Every cell is emitted twice — as the original ``value_raw`` string *and* a
-  best-effort parsed ``value`` float — so no information is lost even if the
-  numeric-format assumptions are wrong for some locale.
+    <div class="custom-tables 60min">
+      <div class="fixed-column js-table-times">          <!-- the Hours -->
+        <span class="fixed-head-column">Hours</span>
+        <ul><li><a>00 - 01</a></li> ... </ul>
+      </div>
+      <div class="js-table-values">
+        <table class="table-01 ...">
+          <thead>
+            ... Baseload / Peakload summary rows ...
+            <tr><th>Buy Volume (MWh)</th><th>Sell Volume (MWh)</th>
+                <th>Volume (MWh)</th><th>Price (€/MWh)</th></tr>   <!-- headers -->
+          </thead>
+          <tbody>
+            <tr><td>25,670.2</td><td>28,398.7</td><td>28,398.7</td><td>114.92</td></tr>
+            ...                                                    <!-- one row / period -->
+          </tbody>
+        </table>
+      </div>
+    </div>
 
-Output is a list of flat dicts, one per (period, metric).
+So the Hours live in a ``<ul>`` (not a table) and the values in a table whose
+``<thead>`` mixes a summary block with the real column headers.  We therefore
+parse with BeautifulSoup: Hours from the ``js-table-times`` list, headers from
+the ``<thead>`` row whose column count matches the ``<tbody>`` rows, and values
+from ``<tbody>``, aligning rows to Hours by position.  This structure is shared
+by every product (day-ahead, intraday auctions, continuous), only the set of
+value columns differs.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from io import StringIO
 
-import pandas as pd
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-_MISSING = {"", "-", "–", "—", "n/a", "na", "n.a.", "null", "none"}
-_TIME_RE = re.compile(r"(\d{1,2})(?::(\d{2}))?")
-# A label column looks like a list of clock times / hour ranges.
-_LABEL_RE = re.compile(r"^\s*\d{1,2}(:\d{2})?\s*[-–]\s*\d{1,2}(:\d{2})?")
+_MISSING = {"", "-", "–", "—", "n/a", "na", "n.a.", "null", "none", "nan"}
+_TIME_RE = re.compile(r"(\d{1,2}):(\d{2})")
+_HOUR_RE = re.compile(r"^\s*(\d{1,2})\b")
 
 
 def _clean_number(raw: object) -> float | None:
-    """Best-effort conversion of an EPEX cell string to a float.
-
-    Assumes the English site convention: ``.`` decimal separator and ``,``
-    thousands separator. Returns ``None`` for blanks / missing markers.
-    """
+    """Convert an EPEX cell string to a float (``.`` decimal, ``,`` thousands)."""
     if raw is None:
         return None
     s = str(raw).strip()
     if s.lower() in _MISSING:
         return None
-    # Drop thousands separators and any stray whitespace / unit suffixes.
     s = s.replace(",", "").replace("\xa0", "").replace(" ", "")
     m = re.search(r"-?\d+(?:\.\d+)?", s)
     if not m:
@@ -52,34 +61,6 @@ def _clean_number(raw: object) -> float | None:
         return float(m.group(0))
     except ValueError:
         return None
-
-
-def _flatten_columns(df: pd.DataFrame) -> list[str]:
-    """Flatten (possibly multi-level) column headers to unique, clean strings.
-
-    Blank / ``Unnamed`` headers and any collisions are given positional
-    fallbacks so every column can be addressed unambiguously.
-    """
-    raw: list[str] = []
-    for col in df.columns:
-        if isinstance(col, tuple):
-            parts = [str(p) for p in col if p and not str(p).startswith("Unnamed")]
-            name = " ".join(dict.fromkeys(parts))  # de-dup, keep order
-        else:
-            name = "" if str(col).startswith("Unnamed") else str(col)
-        raw.append(name.strip())
-
-    cols: list[str] = []
-    seen: dict[str, int] = {}
-    for i, name in enumerate(raw):
-        base = name or f"col_{i}"
-        if base in seen:
-            seen[base] += 1
-            base = f"{base}_{seen[base]}"
-        else:
-            seen[base] = 0
-        cols.append(base)
-    return cols
 
 
 def _split_unit(header: str) -> tuple[str, str | None]:
@@ -95,121 +76,115 @@ def _split_unit(header: str) -> tuple[str, str | None]:
 
 def _period_start(label: str, delivery_date) -> str | None:
     """Derive an ISO ``delivery_date`` + start-time from a period label."""
-    m = _TIME_RE.search(str(label))
-    if not m:
-        return None
-    hour = int(m.group(1))
-    minute = int(m.group(2) or 0)
+    s = str(label)
+    m = _TIME_RE.search(s)
+    if m:
+        hour, minute = int(m.group(1)), int(m.group(2))
+    else:
+        h = _HOUR_RE.match(s)
+        if not h:
+            return None
+        hour, minute = int(h.group(1)), 0
     if hour > 24 or minute >= 60:
         return None
-    # Hour 24 rolls to 00 of the same delivery day for our purposes.
-    hour = hour % 24
+    hour %= 24
     return f"{delivery_date.isoformat()}T{hour:02d}:{minute:02d}:00"
 
 
-def _looks_like_label_series(series: pd.Series) -> bool:
-    """True if a column is mostly hour-range / clock-time labels."""
-    vals = [str(v) for v in series.dropna().tolist()]
-    if not vals:
-        return False
-    hits = sum(1 for v in vals if _LABEL_RE.match(v))
-    return hits >= max(2, len(vals) // 2)
+def _cell_text(el) -> str:
+    """Collapse an element's text (joining <br>-separated parts with a space)."""
+    return " ".join(el.get_text(separator=" ", strip=True).split())
 
 
-def _score_table(df: pd.DataFrame) -> int:
-    """Heuristic score: rows x numeric-ish columns."""
-    numeric_cols = 0
-    for col in df.columns:
-        parsed = df[col].map(_clean_number)
-        if parsed.notna().sum() >= max(2, len(df) // 2):
-            numeric_cols += 1
-    return len(df) * numeric_cols
+def _row_resolution(tr) -> int:
+    """Resolution (minutes) of a continuous-table row from its CSS class."""
+    cls = set(tr.get("class", []))
+    if "lvl-2" in cls:
+        return 15
+    if "lvl-1" in cls:
+        return 30
+    return 60
+
+
+def _header_row(table, ncols: int):
+    """Return the <thead> row whose <th> count matches the data rows."""
+    thead = table.find("thead")
+    if thead is None:
+        return None
+    match = None
+    for tr in thead.find_all("tr"):
+        ths = tr.find_all("th")
+        if len(ths) == ncols:
+            match = ths  # keep the last matching row (the real column headers)
+    return match
 
 
 def parse_market_results(html: str, meta: dict) -> list[dict]:
-    """Extract long-format records from a market-results HTML page.
+    """Extract long-format records from a market-results HTML page."""
+    soup = BeautifulSoup(html, "lxml")
 
-    ``meta`` supplies the request context (market_area, modality, sub_modality,
-    auction, product, delivery_date, trading_date, source_url, scraped_at) that
-    is copied onto every emitted record.
-    """
-    try:
-        tables = pd.read_html(StringIO(html))
-    except ValueError:
-        logger.debug("no <table> elements found for %s", meta.get("source_url"))
-        return []
-    if not tables:
-        return []
+    times = [
+        _cell_text(li)
+        for li in soup.select(".js-table-times ul li")
+    ]
 
-    # Pick the richest table as the values table.
-    scored = [(_score_table(df), df) for df in tables]
-    scored.sort(key=lambda t: t[0], reverse=True)
-    best_score, values = scored[0]
-    if best_score == 0:
-        logger.debug("no numeric table for %s", meta.get("source_url"))
+    table = soup.select_one(".js-table-values table") or soup.select_one("table.table-01")
+    if table is None:
+        logger.debug("no values table for %s", meta.get("source_url"))
+        return []
+    tbody = table.find("tbody")
+    if tbody is None:
+        return []
+    data_rows = [tr for tr in tbody.find_all("tr", recursive=False)]
+    data_rows = [r for r in data_rows if r.find_all("td")]
+    if not data_rows:
         return []
 
-    values = values.copy()
-    values.columns = _flatten_columns(values)
-
-    # Find period labels: prefer a label-like column *inside* the values table,
-    # otherwise look for a sibling single-column label table, otherwise fall
-    # back to the row position.
-    label_col = None
-    for col in values.columns:
-        if _looks_like_label_series(values[col]):
-            label_col = col
-            break
-
-    labels: list
-    if label_col is not None:
-        labels = values[label_col].tolist()
-        metric_cols = [c for c in values.columns if c != label_col]
+    ncols = len(data_rows[0].find_all("td"))
+    header_ths = _header_row(table, ncols)
+    if header_ths:
+        headers = [_cell_text(th) for th in header_ths]
     else:
-        sibling = _find_sibling_labels(tables, len(values))
-        labels = sibling if sibling is not None else list(range(len(values)))
-        metric_cols = list(values.columns)
+        headers = [f"col_{i}" for i in range(ncols)]
+
+    # Continuous pages embed all three resolutions (60/30/15 min) in one table
+    # and hide the non-selected ones via CSS classes (lvl-1 = 30, lvl-2 = 15,
+    # neither = 60); the browser filters client-side. Day-ahead / IDA pages are
+    # already single-resolution. So: if the table mixes levels, keep only the
+    # rows matching the requested product.
+    has_levels = any(
+        {"lvl-1", "lvl-2"} & set(r.get("class", [])) for r in data_rows
+    )
+    target = int(meta.get("product") or 60)
+    selected = [
+        (i, r) for i, r in enumerate(data_rows)
+        if not has_levels or _row_resolution(r) == target
+    ]
 
     delivery_date = meta["delivery_date"]
     records: list[dict] = []
-    for i, (_, row) in enumerate(values.iterrows()):
-        label = labels[i] if i < len(labels) else i
-        period_label = "" if _is_blank(label) else str(label).strip()
+    for out_index, (i, row) in enumerate(selected):
+        cells = row.find_all("td")
+        period_label = times[i] if i < len(times) else str(i)
+        if not period_label or period_label.strip().lower() in _MISSING:
+            continue
         period_start = _period_start(period_label, delivery_date)
-        for col in metric_cols:
-            metric, unit = _split_unit(str(col))
-            raw = row[col]
-            if _is_blank(raw):
+        for j, td in enumerate(cells):
+            header = headers[j] if j < len(headers) else f"col_{j}"
+            metric, unit = _split_unit(header)
+            raw = _cell_text(td)
+            if raw.lower() in _MISSING:
                 continue
             records.append(
                 {
                     **meta,
-                    "period_index": i,
+                    "period_index": out_index,
                     "period_label": period_label,
                     "period_start": period_start,
                     "metric": metric,
                     "unit": unit,
-                    "value_raw": str(raw).strip(),
+                    "value_raw": raw,
                     "value": _clean_number(raw),
                 }
             )
     return records
-
-
-def _find_sibling_labels(tables: list[pd.DataFrame], n_rows: int):
-    """Look for a separate label table with matching row count."""
-    for df in tables:
-        if len(df) != n_rows:
-            continue
-        for col in df.columns:
-            if _looks_like_label_series(df[col]):
-                return df[col].tolist()
-    return None
-
-
-def _is_blank(value: object) -> bool:
-    if value is None:
-        return True
-    if isinstance(value, float) and pd.isna(value):
-        return True
-    return str(value).strip().lower() in _MISSING
