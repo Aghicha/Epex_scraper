@@ -40,6 +40,50 @@ def _select_specs(slugs: list[str] | None) -> list[QuerySpec]:
     return [s for s in config.QUERY_SPECS if s.slug in wanted]
 
 
+class _Pacer:
+    """Keeps requests under EPEX's per-IP rate limit.
+
+    EPEX serves only a handful of results pages before returning throttle
+    placeholders. Two mechanisms keep a long run alive without manual pacing:
+
+    * **Proactive:** pause ``cooldown`` seconds every ``burst`` requests so the
+      token bucket refills before it empties.
+    * **Reactive:** if a throttle still slips through, wait ``throttle_wait``
+      seconds for the limit to clear and retry the same combination up to
+      ``throttle_retries`` times.
+
+    A throttle therefore never aborts the run; at worst the day is left for the
+    next (resumable) run.
+    """
+
+    def __init__(self, args: argparse.Namespace):
+        self.burst = args.burst
+        self.cooldown = args.cooldown
+        self.throttle_wait = args.throttle_wait
+        self.throttle_retries = args.throttle_retries
+        self._since_cooldown = 0
+
+    def run(self, fn, *fn_args) -> str:
+        if self.burst and self._since_cooldown >= self.burst:
+            logger.info("burst pacing: cooling down %.0fs", self.cooldown)
+            time.sleep(self.cooldown)
+            self._since_cooldown = 0
+        self._since_cooldown += 1
+
+        outcome = fn(*fn_args)
+        tries = 0
+        while outcome == "throttled" and tries < self.throttle_retries:
+            tries += 1
+            logger.warning(
+                "rate-limited — waiting %.0fs for the limit to clear (retry %d/%d)",
+                self.throttle_wait, tries, self.throttle_retries,
+            )
+            time.sleep(self.throttle_wait)
+            self._since_cooldown = 0
+            outcome = fn(*fn_args)
+        return outcome
+
+
 def run(args: argparse.Namespace) -> int:
     today = args.today or datetime.now(timezone.utc).date()
     data_dir = Path(args.data_dir)
@@ -62,8 +106,8 @@ def run(args: argparse.Namespace) -> int:
         len(specs), len(delivery_dates), today,
     )
 
+    pacer = _Pacer(args)
     consecutive_forbidden = 0
-    consecutive_throttled = 0
     aborted = False
     for spec in specs:
         if aborted:
@@ -88,18 +132,19 @@ def run(args: argparse.Namespace) -> int:
                         stats["skipped_settled"] += 1
                         continue
 
-                    outcome = _scrape_one(
-                        session, spec, market_area, product, delivery_date,
-                        data_dir, raw_dir, args.sleep,
+                    outcome = pacer.run(
+                        _scrape_one, session, spec, market_area, product,
+                        delivery_date, data_dir, raw_dir, args.sleep,
                     )
                     stats[outcome] += 1
 
-                    # Circuit breakers: if EPEX blocks (403) or throttles us
-                    # many times in a row, stop early instead of grinding for
-                    # an hour. Unsettled days are re-fetched on the next run.
+                    # EPEX rate-limits per IP (~a few requests then throttle
+                    # pages); the pacer handles that by cooling down and
+                    # retrying, so a throttle never aborts the run — the day is
+                    # just retried next time. Only a persistent 403 (WAF/IP
+                    # block), which retrying can't fix, aborts early.
                     if outcome == "forbidden":
                         consecutive_forbidden += 1
-                        consecutive_throttled = 0
                         if consecutive_forbidden >= args.max_forbidden:
                             logger.error(
                                 "aborting: %d consecutive 403s — EPEX is refusing "
@@ -108,21 +153,8 @@ def run(args: argparse.Namespace) -> int:
                             )
                             aborted = True
                             break
-                    elif outcome == "throttled":
-                        consecutive_throttled += 1
-                        consecutive_forbidden = 0
-                        if consecutive_throttled >= args.max_throttled:
-                            logger.error(
-                                "aborting: %d consecutive throttle responses — EPEX "
-                                "is rate-limiting this IP; try again later or raise "
-                                "--sleep. Unsettled days retry on the next run.",
-                                consecutive_throttled,
-                            )
-                            aborted = True
-                            break
                     else:
                         consecutive_forbidden = 0
-                        consecutive_throttled = 0
 
     stats["duration_s"] = int((datetime.now(timezone.utc) - started).total_seconds())
     _report(stats, started, today, data_dir, args)
@@ -244,11 +276,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="comma-separated instrument slugs (default: all)")
     p.add_argument("--sleep", type=float, default=config.REQUEST_SLEEP,
                    help="seconds to sleep between requests (default: %(default)s)")
+    p.add_argument("--burst", type=int, default=4,
+                   help="requests before a cooldown pause; EPEX rate-limits per "
+                        "IP after a few requests (default: 4, 0 disables)")
+    p.add_argument("--cooldown", type=float, default=30.0,
+                   help="seconds to pause every --burst requests (default: 30)")
+    p.add_argument("--throttle-wait", type=float, default=60.0,
+                   help="seconds to wait for the rate-limit to clear after a "
+                        "throttle response (default: 60)")
+    p.add_argument("--throttle-retries", type=int, default=3,
+                   help="times to wait-and-retry a throttled request "
+                        "(default: 3)")
     p.add_argument("--max-forbidden", type=int, default=20,
                    help="abort after this many consecutive 403s (default: 20)")
-    p.add_argument("--max-throttled", type=int, default=15,
-                   help="abort after this many consecutive throttle responses "
-                        "(default: 15)")
     p.add_argument("--user-agent",
                    help="override the browser User-Agent sent to EPEX")
     p.add_argument("--save-raw", metavar="DIR",
