@@ -28,7 +28,9 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # Burst pacing + throttle waits make big backfills slow; a normal daily run
+    # (settled days skipped) is much shorter.
+    timeout-minutes: 330
     steps:
       - name: Checkout
         uses: actions/checkout@v4

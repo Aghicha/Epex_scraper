@@ -125,17 +125,24 @@ Typical causes of an empty result:
   on that day. EPEX serves a page with a `no-data-section`; the parser returns
   no rows (expected, and *not* retried).
 * **403** — see *Troubleshooting 403* below.
-* **Throttling** — under load EPEX intermittently returns a tiny placeholder
-  page or a table-less JS shell (neither the results table nor a no-data
-  message). The client detects these (`is_valid_page`) and **retries with
-  backoff**; raise `--sleep` if you still see `throttle/shell` warnings on big
-  runs.
+* **Rate-limiting (the big one)** — EPEX enforces a **strict per-IP limit**:
+  after only a handful of requests it returns tiny placeholder pages, from *any*
+  IP (residential or datacenter). The scraper handles this automatically:
+  * a **cooldown pause** every `--burst` requests (default 4 / `--cooldown` 30 s)
+    keeps you under the limit proactively;
+  * if a throttle still slips through, it **waits `--throttle-wait` seconds
+    (default 60) and retries** — a throttle never aborts the run.
+
+  A full backfill is therefore slow but unattended; because runs are
+  **resumable** (already-stored days are skipped), just re-run to fill any days
+  a run couldn't reach. Tune `--burst` / `--cooldown` up if you still see
+  `rate-limited` warnings.
 * **`values table … NOT FOUND` with a real-size page** — EPEX changed the
   results markup. The saved `--save-raw` HTML shows the new structure; adjust
   the selectors in [`epex_scraper/parser.py`](epex_scraper/parser.py).
 
-The run's tallies (`written` / `unchanged` / `empty` / `forbidden` / `error`)
-are logged as the final `run summary` line and saved to
+The run's tallies (`written` / `unchanged` / `empty` / `throttled` /
+`forbidden` / `error`) are logged as the final `run summary` line and saved to
 `data/_manifest/last_run.json`.
 
 ## The cron job
