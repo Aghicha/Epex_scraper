@@ -2,20 +2,25 @@ name: Scrape EPEX market results
 
 on:
   schedule:
-    # Daily at 22:00 UTC. Day-ahead auction results for the next delivery day
-    # publish around midday CET; running late in the day also lets the rolling
-    # 3-day window pick up finalised intraday data for the current day.
-    - cron: "0 22 * * *"
+    # Every 15 minutes. EPEX enforces a strict per-IP limit — only a handful
+    # of requests before sustained throttling that doesn't clear within one
+    # run. The scraper retries a throttled combo until it succeeds rather
+    # than skipping it (see README "Rate-limiting"), so a run can take a
+    # while if the limit is genuinely stuck — see the job `timeout-minutes`
+    # below for what happens then, and set an EPEX_PROXIES secret if that's
+    # a recurring problem. `concurrency` below means a slow run just delays
+    # (not doubles-up-with) the next scheduled one.
+    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       days_back:
         description: "Delivery days before today to fetch"
         required: false
-        default: "2"
+        default: "1"
       days_forward:
         description: "Delivery days after today to fetch"
         required: false
-        default: "2"
+        default: "1"
 
 # Never let two scrape runs overwrite each other's commit.
 concurrency:
@@ -28,9 +33,14 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    # Burst pacing + throttle waits make big backfills slow; a normal daily run
-    # (settled days skipped) is much shorter.
-    timeout-minutes: 330
+    # A throttled combo is retried until it succeeds, never skipped, so a
+    # sustained/unresolvable block can make a run take a long time — there is
+    # no self-imposed cap. This timeout is the outer safety net: if it fires,
+    # the job is killed before the "Commit new data" step runs, so that run's
+    # writes are lost (previously committed data is unaffected, and the next
+    # scheduled run just retries). Configure EPEX_PROXIES (see the Scrape
+    # step below) if this starts firing regularly.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,16 +56,18 @@ jobs:
 
       - name: Scrape
         # If EPEX 403s from the Actions runner (datacenter IPs are often WAF-
-        # blocked), add an EPEX_PROXY repo secret (e.g. a residential proxy URL)
-        # and uncomment the env block below to route requests through it.
+        # blocked) or throttling keeps stopping runs early, add an
+        # EPEX_PROXIES repo secret — a comma-separated list of proxy URLs —
+        # and uncomment the env line below. The scraper round-robins one
+        # proxy per request (see client.ProxyRotator), so no single egress IP
+        # ever sees enough traffic to trip the per-IP rate limit.
         # env:
-        #   HTTPS_PROXY: ${{ secrets.EPEX_PROXY }}
-        #   HTTP_PROXY: ${{ secrets.EPEX_PROXY }}
+        #   EPEX_PROXIES: ${{ secrets.EPEX_PROXIES }}
         run: |
           python -m epex_scraper.scrape \
             --data-dir data \
-            --days-back "${{ github.event.inputs.days_back || '2' }}" \
-            --days-forward "${{ github.event.inputs.days_forward || '2' }}"
+            --days-back "${{ github.event.inputs.days_back || '1' }}" \
+            --days-forward "${{ github.event.inputs.days_forward || '1' }}"
 
       - name: Commit new data
         run: |

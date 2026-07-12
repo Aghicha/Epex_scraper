@@ -34,3 +34,26 @@ def test_pacer_gives_up_after_retries(monkeypatch):
     pacer = scrape._Pacer(_args(burst=0, throttle_retries=2))
     result = pacer.run(lambda: "throttled")
     assert result == "throttled"         # still throttled → left for next run
+
+
+class _FakeProxyPool:
+    """Stand-in for client.ProxyRotator — only __len__ matters to the pacer."""
+
+    def __init__(self, n):
+        self._n = n
+
+    def __len__(self):
+        return self._n
+
+
+def test_pacer_retries_immediately_when_proxies_available(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(scrape.time, "sleep", lambda s: sleeps.append(s))
+    outcomes = iter(["throttled", "throttled", "written"])
+    pacer = scrape._Pacer(_args(burst=0, throttle_retries=3),
+                          proxy_pool=_FakeProxyPool(2))
+    result = pacer.run(lambda: next(outcomes))
+    assert result == "written"
+    # A different egress IP is already used on retry, so waiting first would
+    # only delay a request that was never going to hit the same block.
+    assert sleeps == []

@@ -18,6 +18,7 @@ instrument actually offers.  Any combination without data still returns a
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 BASE_URL = "https://www.epexspot.com/en/market-results"
@@ -44,7 +45,16 @@ PRODUCTS: list[int] = [60, 15]
 
 @dataclass(frozen=True)
 class QuerySpec:
-    """One tradable instrument on the market-results page.
+    """One tradable instrument variant on the market-results page.
+
+    EPEX needs a different ``auction`` filter code per market area even
+    within the same conceptual instrument (e.g. day-ahead is ``MRC`` for the
+    SDAC-coupled zones but ``GB``/``CH`` for their standalone auctions), so
+    each variant is still its own ``QuerySpec`` for fetching. ``slug`` is the
+    *output* grouping instead: every variant of the same instrument shares
+    one slug so all of its market areas land under one ``data/<slug>/`` tree
+    (see :mod:`epex_scraper.storage`), rather than being split across
+    per-market-area folders that all mean "day-ahead" or "IDA1" underneath.
 
     Attributes:
         modality: ``Auction`` or ``Continuous``.
@@ -52,9 +62,11 @@ class QuerySpec:
             continuous (sending it makes EPEX return a "no data" page).
         auction: Auction / coupling code (``MRC``, ``GB``, ``CH``, ``IDA1`` …).
             Empty string for continuous (no auction).
-        slug: Short, filesystem-safe identifier used in output paths.
-        market_areas: Market areas this instrument offers.
-        products: Contract resolutions to request for this instrument.
+        slug: Output grouping — filesystem-safe folder name shared by every
+            variant of the same instrument (``day-ahead``, ``intraday-ida1``,
+            ``continuous``, …).
+        market_areas: Market areas this variant offers.
+        products: Contract resolutions to request for this variant.
     """
 
     modality: str
@@ -66,20 +78,25 @@ class QuerySpec:
 
 
 # The instruments to enumerate. Codes/areas taken from the live filter form.
+# Grouped by output slug: every variant below that shares a slug writes into
+# the same data/<slug>/ tree, split further only by market area (which never
+# collides across a group's variants — GB/CH are never also SDAC zones).
 QUERY_SPECS: list[QuerySpec] = [
-    # --- Day-ahead auctions ------------------------------------------------
+    # --- Day-ahead auctions: SDAC coupling + standalone GB/CH auctions -----
     QuerySpec("Auction", "DayAhead", "MRC", "day-ahead", SDAC_ZONES, [60, 15]),
-    QuerySpec("Auction", "DayAhead", "GB", "day-ahead-gb", ["GB"], [60]),
-    QuerySpec("Auction", "DayAhead", "30-call-GB", "day-ahead-gb-30", ["GB"], [30]),
-    QuerySpec("Auction", "DayAhead", "CH", "day-ahead-ch", ["CH"], [60, 15]),
-    # --- Intraday auctions (IDA1 / IDA2 / IDA3, quarter-hourly) ------------
+    QuerySpec("Auction", "DayAhead", "GB", "day-ahead", ["GB"], [60]),
+    QuerySpec("Auction", "DayAhead", "30-call-GB", "day-ahead", ["GB"], [30]),
+    QuerySpec("Auction", "DayAhead", "CH", "day-ahead", ["CH"], [60, 15]),
+    # --- Intraday auction 1 (IDA1, quarter-hourly) -------------------------
     QuerySpec("Auction", "Intraday", "IDA1", "intraday-ida1", SDAC_ZONES, [15]),
+    QuerySpec("Auction", "Intraday", "CH-IDA1", "intraday-ida1", ["CH"], [15]),
+    QuerySpec("Auction", "Intraday", "GB-IDA1", "intraday-ida1", ["GB"], [60]),
+    # --- Intraday auction 2 (IDA2, quarter-hourly) -------------------------
     QuerySpec("Auction", "Intraday", "IDA2", "intraday-ida2", SDAC_ZONES, [15]),
+    QuerySpec("Auction", "Intraday", "CH-IDA2", "intraday-ida2", ["CH"], [15]),
+    QuerySpec("Auction", "Intraday", "GB-IDA2", "intraday-ida2", ["GB"], [60]),
+    # --- Intraday auction 3 (IDA3, quarter-hourly, SDAC only) --------------
     QuerySpec("Auction", "Intraday", "IDA3", "intraday-ida3", SDAC_ZONES, [15]),
-    QuerySpec("Auction", "Intraday", "CH-IDA1", "intraday-ch-ida1", ["CH"], [15]),
-    QuerySpec("Auction", "Intraday", "CH-IDA2", "intraday-ch-ida2", ["CH"], [15]),
-    QuerySpec("Auction", "Intraday", "GB-IDA1", "intraday-gb-ida1", ["GB"], [60]),
-    QuerySpec("Auction", "Intraday", "GB-IDA2", "intraday-gb-ida2", ["GB"], [60]),
     # --- Continuous intraday (SIDC) — no sub_modality, no auction ----------
     QuerySpec("Continuous", None, "", "continuous", CONTINUOUS_ZONES, [60, 30, 15]),
 ]
@@ -101,6 +118,23 @@ USER_AGENT = (
 )
 REQUEST_TIMEOUT = 30  # seconds
 REQUEST_RETRIES = 4
+# Throttle/shell responses get their own, much smaller retry budget than
+# network errors: a sustained per-IP limit doesn't clear in seconds, so
+# spending REQUEST_RETRIES' worth of growing backoff (tens of seconds) on it
+# just delays the pacer, which is the layer that actually decides whether a
+# longer wait-and-retry of the whole combo is worthwhile. This only smooths a
+# one-off blip.
+THROTTLE_RETRIES = 2
+THROTTLE_PAUSE = 3.0  # seconds between those quick attempts
+
+# Optional pool of proxy URLs to round-robin through, one per request, so no
+# single egress IP ever sees enough traffic to trip EPEX's per-IP rate limit.
+# Comma-separated, e.g. "http://user:pass@host1:port,http://user:pass@host2:port".
+# Empty by default: requests then falls back to its normal HTTP(S)_PROXY env
+# var behaviour (one static proxy, or a direct connection).
+EPEX_PROXIES: list[str] = [
+    p.strip() for p in os.environ.get("EPEX_PROXIES", "").split(",") if p.strip()
+]
 # Seconds to sleep between requests. Be a good citizen — EPEX is a shared,
 # public resource and its terms restrict usage to internal purposes — and it
 # throttles bursts, returning tiny placeholder pages, so don't go too fast.

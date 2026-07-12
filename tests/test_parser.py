@@ -6,13 +6,15 @@ from epex_scraper.parser import _clean_number, parse_market_results
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def _meta():
-    return {
+def _meta(**overrides):
+    meta = {
         "market_area": "DE-LU", "modality": "Auction", "sub_modality": "DayAhead",
-        "auction": "MRC", "product": 60, "delivery_date": date(2026, 7, 9),
-        "trading_date": "2026-07-08", "source_url": "https://example/test",
-        "scraped_at": "2026-07-09T00:00:00+00:00",
+        "auction": "MRC", "product": 60, "delivery_date": date(2026, 7, 8),
+        "trading_date": "2026-07-07", "source_url": "https://example/test",
+        "scraped_at": "2026-07-08T00:00:00+00:00",
     }
+    meta.update(overrides)
+    return meta
 
 
 def test_clean_number_variants():
@@ -39,7 +41,7 @@ def test_parses_real_dom_structure():
     assert "Baseload" not in labels and "Peakload" not in labels
 
     first = next(r for r in records if r["period_label"] == "00 - 01")
-    assert first["period_start"] == "2026-07-09T00:00:00"
+    assert first["period_start"] == "2026-07-08T00:00:00"
 
     p0 = {r["metric"]: r["value"] for r in records if r["period_index"] == 0}
     assert p0 == {"buy_volume": 25670.2, "sell_volume": 28398.7,
@@ -66,6 +68,16 @@ def test_continuous_resolution_filtering():
     recs = parse_market_results(html, meta)
     assert {r["period_label"] for r in recs} == {"00 - 01"}
     assert {"low", "high", "buy_volume"} == {r["metric"] for r in recs}
+
+
+def test_page_date_mismatch_is_discarded():
+    # EPEX can silently fall back to a nearby day's page for delivery dates
+    # outside its published window; the page heading still says which day it
+    # actually rendered ("08 July 2026"), so a request for a different day
+    # must be rejected rather than mislabeled with the requested date.
+    html = (FIXTURES / "dayahead_sample.html").read_text(encoding="utf-8")
+    records = parse_market_results(html, _meta(delivery_date=date(2026, 7, 12)))
+    assert records == []
 
 
 def test_no_data_page_returns_empty():

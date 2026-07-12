@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime
 
 from bs4 import BeautifulSoup
 
@@ -44,6 +45,30 @@ logger = logging.getLogger(__name__)
 _MISSING = {"", "-", "–", "—", "n/a", "na", "n.a.", "null", "none", "nan"}
 _TIME_RE = re.compile(r"(\d{1,2}):(\d{2})")
 _HOUR_RE = re.compile(r"^\s*(\d{1,2})\b")
+# The results heading echoes the delivery date it actually rendered, e.g.
+# "Auction &gt; Day-Ahead &gt; SDAC &gt; 60min index &gt; DE-LU &gt; 08 July 2026".
+_PAGE_DATE_RE = re.compile(r"(\d{1,2}\s+[A-Za-z]+\s+\d{4})\s*$")
+
+
+def _page_delivery_date(soup):
+    """The delivery date EPEX actually rendered, parsed from the page heading.
+
+    Requesting a delivery date outside EPEX's ~3-day published window doesn't
+    reliably 404 or show "no data" — it can silently fall back to a nearby
+    day's page. The heading is the only place that echoes which day the table
+    actually belongs to, so callers use this to detect and reject that
+    mismatch instead of mislabeling the fallback data with the requested date.
+    """
+    h2 = soup.find("h2")
+    if h2 is None:
+        return None
+    m = _PAGE_DATE_RE.search(_cell_text(h2))
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%d %B %Y").date()
+    except ValueError:
+        return None
 
 
 def _clean_number(raw: object) -> float | None:
@@ -123,6 +148,16 @@ def parse_market_results(html: str, meta: dict) -> list[dict]:
     """Extract long-format records from a market-results HTML page."""
     soup = BeautifulSoup(html, "lxml")
 
+    delivery_date = meta["delivery_date"]
+    page_date = _page_delivery_date(soup)
+    if page_date is not None and page_date != delivery_date:
+        logger.warning(
+            "page date mismatch: requested %s, page shows %s (%s) — discarding "
+            "to avoid mislabeling",
+            delivery_date, page_date, meta.get("source_url"),
+        )
+        return []
+
     times = [
         _cell_text(li)
         for li in soup.select(".js-table-times ul li")
@@ -161,7 +196,6 @@ def parse_market_results(html: str, meta: dict) -> list[dict]:
         if not has_levels or _row_resolution(r) == target
     ]
 
-    delivery_date = meta["delivery_date"]
     records: list[dict] = []
     for out_index, (i, row) in enumerate(selected):
         cells = row.find_all("td")

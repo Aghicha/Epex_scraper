@@ -89,3 +89,33 @@ def test_transient_5xx_is_retried(monkeypatch):
     session = FakeSession([requests.ConnectionError("boom"), FakeResponse(200, VALID)])
     assert _fetch(session) == VALID
     assert session.calls == 2
+
+
+def test_proxy_rotator_empty_pool_returns_none():
+    rotator = client.ProxyRotator([])
+    assert len(rotator) == 0
+    assert rotator.next() is None
+    assert rotator.next() is None
+
+
+def test_proxy_rotator_round_robins():
+    rotator = client.ProxyRotator(["http://p1", "http://p2"])
+    assert len(rotator) == 2
+    assert rotator.next() == {"http": "http://p1", "https": "http://p1"}
+    assert rotator.next() == {"http": "http://p2", "https": "http://p2"}
+    assert rotator.next() == {"http": "http://p1", "https": "http://p1"}
+
+
+def test_fetch_passes_proxies_through_to_session(monkeypatch):
+    monkeypatch.setattr(client.time, "sleep", lambda *_: None)
+    captured_kwargs = []
+
+    class CapturingSession(FakeSession):
+        def get(self, *args, **kwargs):
+            captured_kwargs.append(kwargs)
+            return super().get(*args, **kwargs)
+
+    session = CapturingSession([FakeResponse(200, VALID)])
+    proxies = {"http": "http://p1", "https": "http://p1"}
+    client.fetch(session, SPEC, "DE-LU", date(2026, 7, 9), 60, proxies=proxies)
+    assert captured_kwargs[0]["proxies"] == proxies

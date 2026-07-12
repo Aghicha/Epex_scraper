@@ -57,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--delivery-date", type=date.fromisoformat,
                    default=date.today(), help="delivery date YYYY-MM-DD")
     p.add_argument("--user-agent", help="override the browser User-Agent")
+    p.add_argument("--proxy", help="single proxy URL to route this request through")
     p.add_argument("--save-raw", metavar="FILE", help="write the raw HTML to FILE")
     args = p.parse_args(argv)
 
@@ -64,18 +65,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.user_agent:
         config.USER_AGENT = args.user_agent
 
-    spec = next((s for s in config.QUERY_SPECS if s.slug == args.specs), None)
+    # slug groups multiple QuerySpec variants together (e.g. "day-ahead" spans
+    # the SDAC/GB/CH auctions), so disambiguate by market area — and by
+    # product too, since GB day-ahead alone has separate 30-min/60-min specs.
+    candidates = [s for s in config.QUERY_SPECS
+                  if s.slug == args.specs and args.market_areas in s.market_areas]
+    with_product = [s for s in candidates if args.products in s.products]
+    spec = (with_product or candidates or [None])[0]
     if spec is None:
-        print(f"unknown spec {args.specs!r}; choices: "
-              f"{', '.join(s.slug for s in config.QUERY_SPECS)}")
+        slugs = sorted({s.slug for s in config.QUERY_SPECS})
+        print(f"no spec named {args.specs!r} offers market area "
+              f"{args.market_areas!r}; known slugs: {', '.join(slugs)}")
         return 2
 
     session = client.make_session()
     params = client.build_params(spec, args.market_areas, args.delivery_date, args.products)
     url = config.BASE_URL + "?" + "&".join(f"{k}={v}" for k, v in params.items() if v != "")
     print(f"GET {url}")
+    proxies = {"http": args.proxy, "https": args.proxy} if args.proxy else None
     try:
-        html = client.fetch(session, spec, args.market_areas, args.delivery_date, args.products)
+        html = client.fetch(session, spec, args.market_areas, args.delivery_date,
+                            args.products, proxies=proxies)
     except client.AccessForbidden:
         print("  403 Forbidden — EPEX blocked this request (see README 'Troubleshooting 403')")
         return 2
