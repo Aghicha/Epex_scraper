@@ -49,15 +49,14 @@ import pandas as pd
 
 from ..domain.assets.models import GenerationAsset
 from ..domain.assets.registry import build_pooled_fleet
-from ..domain.clearing.solver import clear
 from ..domain.costs.estimate import FuelPrices, estimate_marginal_costs
 from ..domain.costs.hydro import RUN_OF_RIVER
 from ..domain.demand.curve import DemandCurve
 from ..domain.interconnectors.model import export_demand_mw, import_supply_asset
-from ..domain.merit_order.builder import build_supply_curve
 from ..ingestion.entsoe.client import EntsoeClient
 from ..ingestion.fuel_co2 import prices as fuel_co2_prices
 from ..ingestion.market_prices.epex_reader import read_actual_day_ahead_prices
+from ..simulation.snapshot import AuctionSnapshot
 
 # Coal/lignite/oil have no free reliable price source yet (see
 # ingestion/fuel_co2/prices.py) — kept flat until one is identified.
@@ -155,44 +154,59 @@ def fetch_day_context(zone: str, delivery_date: date, data_root: Path) -> DayCon
     )
 
 
+def build_hour_snapshot(
+    context: DayContext,
+    period_start,
+    offsets: dict[str, float] | None = None,
+    water_values: dict[str, float] | None = None,
+) -> AuctionSnapshot:
+    """The AuctionSnapshot for one hour of an already-fetched day — the same
+    per-hour setup ``clear_day`` uses, exposed directly so the simulation
+    engine (tradingsurv/simulation/) has a real base snapshot to mutate,
+    not just a printed price. No network calls."""
+    costs = estimate_marginal_costs(
+        context.assets, context.fuel_prices, water_value_eur_mwh=water_values, offsets=offsets
+    )
+    ts = pd.Timestamp(period_start, tz="Europe/Vienna")
+
+    available_mw = {}
+    for asset in context.assets:
+        column = WEATHER_DRIVEN_COLUMNS.get(asset.technology)
+        if column is not None and column in context.wind_solar.columns:
+            available_mw[asset.id] = _nearest(context.wind_solar[column], ts)
+        elif asset.technology == RUN_OF_RIVER and context.ror_actual is not None:
+            available_mw[asset.id] = _nearest(context.ror_actual, ts)
+
+    hour_assets = list(context.assets)
+    net_position_mw = _nearest(context.net_position, ts)
+    reference_price = context.reference_prices.get(period_start)
+
+    if reference_price is not None:
+        import_asset = import_supply_asset(context.zone, net_position_mw)
+        if import_asset is not None:
+            hour_assets.append(import_asset)
+            costs[import_asset.id] = reference_price
+    # Missing reference price for this hour -> interconnector effect is
+    # skipped for it rather than guessed.
+
+    demand_mw = _nearest(context.load_series, ts) + export_demand_mw(net_position_mw)
+    demand = DemandCurve(base_mw=demand_mw, reference_price_eur_mwh=context.actual[period_start])
+
+    return AuctionSnapshot(
+        zone=context.zone, assets=tuple(hour_assets), costs=costs, demand=demand, available_mw=available_mw
+    )
+
+
 def clear_day(
     context: DayContext,
     offsets: dict[str, float] | None = None,
     water_values: dict[str, float] | None = None,
 ) -> list[dict]:
     """Pure: clear every hour of an already-fetched day. No network calls."""
-    costs = estimate_marginal_costs(context.assets, context.fuel_prices, water_value_eur_mwh=water_values, offsets=offsets)
-
     rows = []
     for period_start in sorted(context.actual):
-        ts = pd.Timestamp(period_start, tz="Europe/Vienna")
-
-        available_mw = {}
-        for asset in context.assets:
-            column = WEATHER_DRIVEN_COLUMNS.get(asset.technology)
-            if column is not None and column in context.wind_solar.columns:
-                available_mw[asset.id] = _nearest(context.wind_solar[column], ts)
-            elif asset.technology == RUN_OF_RIVER and context.ror_actual is not None:
-                available_mw[asset.id] = _nearest(context.ror_actual, ts)
-
-        hour_assets = list(context.assets)
-        hour_costs = dict(costs)
-        net_position_mw = _nearest(context.net_position, ts)
-        reference_price = context.reference_prices.get(period_start)
-
-        if reference_price is not None:
-            import_asset = import_supply_asset(context.zone, net_position_mw)
-            if import_asset is not None:
-                hour_assets.append(import_asset)
-                hour_costs[import_asset.id] = reference_price
-        # Missing reference price for this hour -> interconnector effect is
-        # skipped for it rather than guessed; net_position_mw is still
-        # reported below so the gap is visible, not silently absorbed.
-
-        demand_mw = _nearest(context.load_series, ts) + export_demand_mw(net_position_mw)
-        supply = build_supply_curve(hour_assets, hour_costs, available_mw=available_mw)
-        demand = DemandCurve(base_mw=demand_mw, reference_price_eur_mwh=context.actual[period_start])
-        result = clear(supply, demand)
+        snapshot = build_hour_snapshot(context, period_start, offsets=offsets, water_values=water_values)
+        result = snapshot.clear()
 
         rows.append({
             "hour": period_start.hour,
@@ -201,8 +215,8 @@ def clear_day(
             "actual_price": context.actual[period_start],
             "price_error": result.price_eur_mwh - context.actual[period_start],
             "marginal_technology": result.marginal_technology,
-            "demand_mw": demand.base_mw,
-            "net_position_mw": net_position_mw,
+            "demand_mw": snapshot.demand.base_mw,
+            "net_position_mw": _nearest(context.net_position, pd.Timestamp(period_start, tz="Europe/Vienna")),
         })
     return rows
 
