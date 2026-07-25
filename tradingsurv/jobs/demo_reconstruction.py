@@ -1,101 +1,71 @@
-"""Phase 0/1 smoke test: reconstruct an AT day-ahead auction and compare to actual.
+"""Phase 0/1: reconstruct a zone's day-ahead auction from real ENTSO-E data
+and compare to the actual settled price.
 
-This wires the whole domain engine (assets -> costs -> merit order -> demand
--> clearing) end to end against real data for one thing only: the actual
-price, read straight from epex_scraper's own archive via ``epex_reader`` — no
-ENTSO-E token needed to run this.
+Real public data feeds this, no synthetic placeholders left for the fleet,
+demand, or gas/CO2 price:
+  - ENTSO-E aggregated installed capacity -> pooled fleet per technology
+  - ENTSO-E day-ahead load forecast       -> hourly demand
+  - ENTSO-E wind/solar generation forecast -> hourly wind/solar availability
+  - Yahoo Finance TTF gas / EUA carbon proxies -> gas_eur_mwh_th / co2_eur_t
+    (see ingestion/fuel_co2/prices.py for why these specific tickers)
+  - epex_scraper's own archive            -> actual price, for comparison
 
-The generation fleet below is a **hand-built placeholder**, not real
-unit-level ENTSO-E data (that's Phase 0's ``installed_capacity_per_unit``
-ingestion, gated on a registered ``ENTSOE_API_TOKEN``). It's deliberately
-Austria-shaped — hydro-dominated, no nuclear or coal, since Austria has
-neither — so the reconstruction is directionally sane, not so it's accurate.
-Its only job is to prove the pipeline runs end to end and to produce a first
-(expectedly large) MAE baseline that Step 7 calibration would then chip away
-at once real assets/generation data are wired in.
+What's still a placeholder: coal/lignite/oil prices (flat constants below —
+no free reliable source found, see ingestion/fuel_co2/prices.py) and
+hydro/battery water values (default to 0, i.e. uncalibrated — Step 7 fits
+these from history). AT's own fleet has no coal/lignite/nuclear, so the coal
+placeholder specifically doesn't affect this zone's reconstruction.
 
-Run: python -m tradingsurv.jobs.demo_reconstruction --date 2026-07-24
+Requires ENTSOE_API_TOKEN (see .env.example).
+
+Run: python -m tradingsurv.jobs.demo_reconstruction --zone AT --date 2026-07-24
 """
 
 from __future__ import annotations
 
 import argparse
-import math
 from datetime import date
 from pathlib import Path
 
-from ..domain.assets.models import GenerationAsset
+import pandas as pd
+
+from ..domain.assets.registry import build_pooled_fleet
 from ..domain.clearing.solver import clear
-from ..domain.costs.hydro import PUMPED_STORAGE, RESERVOIR, RUN_OF_RIVER, HydroCostModel
-from ..domain.costs.renewables import ZeroMarginalCostModel
-from ..domain.costs.thermal import ThermalCostModel
+from ..domain.costs.estimate import FuelPrices, estimate_marginal_costs
 from ..domain.demand.curve import DemandCurve
 from ..domain.merit_order.builder import build_supply_curve
+from ..ingestion.entsoe.client import EntsoeClient
+from ..ingestion.fuel_co2 import prices as fuel_co2_prices
 from ..ingestion.market_prices.epex_reader import read_actual_day_ahead_prices
 
-GAS_PRICE_EUR_MWH_TH = 30.0
-CO2_PRICE_EUR_T = 70.0
-
-ASSETS = [
-    GenerationAsset(id="hydro_ror", zone="AT", name="Run-of-river fleet", technology=RUN_OF_RIVER, capacity_mw=5000),
-    GenerationAsset(id="hydro_res", zone="AT", name="Reservoir fleet", technology=RESERVOIR, capacity_mw=3000),
-    GenerationAsset(id="hydro_pump", zone="AT", name="Pumped storage fleet", technology=PUMPED_STORAGE, capacity_mw=3000),
-    GenerationAsset(id="wind", zone="AT", name="Wind fleet", technology="wind_onshore", capacity_mw=3200),
-    GenerationAsset(id="solar", zone="AT", name="Solar fleet", technology="solar", capacity_mw=3000),
-    GenerationAsset(id="gas_ccgt", zone="AT", name="CCGT fleet", technology="gas_ccgt", capacity_mw=2000, efficiency=0.55, fuel="natural_gas"),
-    GenerationAsset(id="gas_ocgt", zone="AT", name="OCGT peakers", technology="gas_ocgt", capacity_mw=1000, efficiency=0.35, fuel="natural_gas"),
-]
+# Coal/lignite/oil have no free reliable price source yet (see
+# ingestion/fuel_co2/prices.py) — kept flat until one is identified.
+PLACEHOLDER_COAL_EUR_MWH_TH = 15.0
+PLACEHOLDER_LIGNITE_EUR_MWH_TH = 8.0
+PLACEHOLDER_OIL_EUR_MWH_TH = 45.0
 
 
-def _solar_capacity_factor(hour: int) -> float:
-    if 6 <= hour <= 20:
-        return max(0.0, math.sin(math.pi * (hour - 6) / 14))
-    return 0.0
+def _current_fuel_prices() -> FuelPrices:
+    return FuelPrices(
+        gas_eur_mwh_th=fuel_co2_prices.gas_price_eur_mwh_th(),
+        coal_eur_mwh_th=PLACEHOLDER_COAL_EUR_MWH_TH,
+        lignite_eur_mwh_th=PLACEHOLDER_LIGNITE_EUR_MWH_TH,
+        oil_eur_mwh_th=PLACEHOLDER_OIL_EUR_MWH_TH,
+        co2_eur_t=fuel_co2_prices.co2_price_eur_t(),
+    )
+
+# tradingsurv technology id -> the column name ENTSO-E's wind/solar forecast uses.
+WEATHER_DRIVEN_COLUMNS = {"wind_onshore": "Wind Onshore", "wind_offshore": "Wind Offshore", "solar": "Solar"}
 
 
-def _wind_capacity_factor(hour: int) -> float:
-    return 0.30  # flat placeholder; real value comes from ENTSO-E generation forecast
+def _nearest(series: pd.Series, timestamp: pd.Timestamp) -> float:
+    """Nearest-in-time lookup — forecast series resolution (15/30/60 min)
+    doesn't always line up exactly with the hour boundary being priced."""
+    idx = series.index.get_indexer([timestamp], method="nearest")[0]
+    return float(series.iloc[idx])
 
 
-def _marginal_costs() -> dict[str, float]:
-    return {
-        "hydro_ror": HydroCostModel(RUN_OF_RIVER).marginal_cost(),
-        "hydro_res": HydroCostModel(RESERVOIR, water_value_eur_mwh=40.0).marginal_cost(),
-        "hydro_pump": HydroCostModel(PUMPED_STORAGE, water_value_eur_mwh=60.0).marginal_cost(),
-        "wind": ZeroMarginalCostModel("wind_onshore").marginal_cost(),
-        "solar": ZeroMarginalCostModel("solar").marginal_cost(),
-        "gas_ccgt": ThermalCostModel(
-            "gas_ccgt", "natural_gas", GAS_PRICE_EUR_MWH_TH, 0.55, CO2_PRICE_EUR_T
-        ).marginal_cost(),
-        "gas_ocgt": ThermalCostModel(
-            "gas_ocgt", "natural_gas", GAS_PRICE_EUR_MWH_TH, 0.35, CO2_PRICE_EUR_T
-        ).marginal_cost(),
-    }
-
-
-def _available_mw(hour: int) -> dict[str, float]:
-    return {
-        "wind": ASSETS[3].capacity_mw * _wind_capacity_factor(hour),
-        "solar": ASSETS[4].capacity_mw * _solar_capacity_factor(hour),
-    }
-
-
-def reconstruct_hour(hour: int, actual_price: float, demand_mw: float = 7000.0) -> dict:
-    costs = _marginal_costs()
-    supply = build_supply_curve(ASSETS, costs, available_mw=_available_mw(hour))
-    demand = DemandCurve(base_mw=demand_mw, reference_price_eur_mwh=actual_price)
-    result = clear(supply, demand)
-    return {
-        "hour": hour,
-        "estimated_price": result.price_eur_mwh,
-        "actual_price": actual_price,
-        "price_error": result.price_eur_mwh - actual_price,
-        "marginal_technology": result.marginal_technology,
-        "marginal_asset_id": result.marginal_asset_id,
-    }
-
-
-def run_demo(zone: str, delivery_date: date, data_root: Path) -> list[dict]:
+def reconstruct_day(zone: str, delivery_date: date, data_root: Path) -> list[dict]:
     actual = read_actual_day_ahead_prices(data_root, zone, delivery_date, resolution=60)
     if not actual:
         raise SystemExit(
@@ -103,9 +73,43 @@ def run_demo(zone: str, delivery_date: date, data_root: Path) -> list[dict]:
             "has epex_scraper archived that day?"
         )
 
+    client = EntsoeClient()
+    day_start = pd.Timestamp(delivery_date, tz="Europe/Vienna")
+    day_end = day_start + pd.Timedelta(days=1)
+
+    capacity = client.installed_capacity_aggregated(zone, day_start, day_end)
+    assets = build_pooled_fleet(zone, capacity)
+    fuel_prices = _current_fuel_prices()
+    print(f"gas: {fuel_prices.gas_eur_mwh_th:.2f} EUR/MWh_th, CO2: {fuel_prices.co2_eur_t:.2f} EUR/t (live)\n")
+    costs = estimate_marginal_costs(assets, fuel_prices)
+
+    load_forecast = client.load_forecast(zone, day_start, day_end)
+    load_series = load_forecast.iloc[:, 0]  # "Forecasted Load"
+
+    wind_solar = client.wind_and_solar_forecast(zone, day_start, day_end)
+
     rows = []
     for period_start in sorted(actual):
-        rows.append(reconstruct_hour(period_start.hour, actual[period_start]))
+        ts = pd.Timestamp(period_start, tz="Europe/Vienna")
+
+        available_mw = {}
+        for asset in assets:
+            column = WEATHER_DRIVEN_COLUMNS.get(asset.technology)
+            if column is not None and column in wind_solar.columns:
+                available_mw[asset.id] = _nearest(wind_solar[column], ts)
+
+        supply = build_supply_curve(assets, costs, available_mw=available_mw)
+        demand = DemandCurve(base_mw=_nearest(load_series, ts), reference_price_eur_mwh=actual[period_start])
+        result = clear(supply, demand)
+
+        rows.append({
+            "hour": period_start.hour,
+            "estimated_price": result.price_eur_mwh,
+            "actual_price": actual[period_start],
+            "price_error": result.price_eur_mwh - actual[period_start],
+            "marginal_technology": result.marginal_technology,
+            "demand_mw": demand.base_mw,
+        })
     return rows
 
 
@@ -116,18 +120,18 @@ def main() -> None:
     parser.add_argument("--data-dir", default=Path(__file__).resolve().parent.parent.parent / "data")
     args = parser.parse_args()
 
-    rows = run_demo(args.zone, date.fromisoformat(args.date), Path(args.data_dir))
+    rows = reconstruct_day(args.zone, date.fromisoformat(args.date), Path(args.data_dir))
 
     errors = [r["price_error"] for r in rows]
     mae = sum(abs(e) for e in errors) / len(errors)
 
-    print(f"{'hour':>4}  {'estimated':>10}  {'actual':>8}  {'error':>8}  marginal")
+    print(f"{'hour':>4}  {'estimated':>10}  {'actual':>8}  {'error':>8}  {'demand_mw':>10}  marginal")
     for r in rows:
         print(
             f"{r['hour']:>4}  {r['estimated_price']:>10.2f}  {r['actual_price']:>8.2f}  "
-            f"{r['price_error']:>8.2f}  {r['marginal_technology']}"
+            f"{r['price_error']:>8.2f}  {r['demand_mw']:>10.0f}  {r['marginal_technology']}"
         )
-    print(f"\nMAE: {mae:.2f} EUR/MWh over {len(rows)} hours (uncalibrated baseline)")
+    print(f"\nMAE: {mae:.2f} EUR/MWh over {len(rows)} hours (uncalibrated baseline, real ENTSO-E fleet/demand)")
 
 
 if __name__ == "__main__":
