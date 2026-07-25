@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TradingSurv — Market Reconstruction &amp; Auction Simulator</title>
+<meta name="description" content="AT day-ahead auction reconstruction and outage simulation, calibrated against real settled prices.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
+</head>
+<body>
+
+<style>
+  .viz-root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --page:           #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --muted:          #898781;
+    --grid:           #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --good:           #006300;
+
+    --hydro-ror:      #2a78d6;
+    --gas:            #eb6834;
+    --hydro-res:      #1baf7a;
+    --solar:          #eda100;
+    --hydro-pump:     #e87ba4;
+    --wind:           #008300;
+    --battery:        #4a3aa7;
+    --oil:            #e34948;
+    --other:          #9e9c94;
+    --import:         #52514e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1:      #1a1a19;
+      --page:           #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --muted:          #898781;
+      --grid:           #2c2c2a;
+      --baseline:       #383835;
+      --border:         rgba(255,255,255,0.10);
+      --good:           #0ca30c;
+
+      --hydro-ror:      #3987e5;
+      --gas:            #d95926;
+      --hydro-res:      #199e70;
+      --solar:          #c98500;
+      --hydro-pump:     #d55181;
+      --wind:           #008300;
+      --battery:        #9085e9;
+      --oil:            #e66767;
+      --other:          #6a6862;
+      --import:         #c3c2b7;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --page:           #0d0d0d;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --muted:          #898781;
+    --grid:           #2c2c2a;
+    --baseline:       #383835;
+    --border:         rgba(255,255,255,0.10);
+    --good:           #0ca30c;
+
+    --hydro-ror:      #3987e5;
+    --gas:            #d95926;
+    --hydro-res:      #199e70;
+    --solar:          #c98500;
+    --hydro-pump:     #d55181;
+    --wind:           #008300;
+    --battery:        #9085e9;
+    --oil:            #e66767;
+    --other:          #6a6862;
+    --import:         #c3c2b7;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { background: var(--page); }
+  .viz-root {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--text-primary);
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 32px 20px 80px;
+  }
+
+  header.page-head { margin-bottom: 28px; }
+  header.page-head h1 { font-size: 22px; font-weight: 650; margin: 0 0 6px; }
+  header.page-head p { font-size: 14px; color: var(--text-secondary); margin: 0; max-width: 640px; line-height: 1.5; }
+
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  .card h2 { font-size: 15px; font-weight: 650; margin: 0 0 4px; }
+  .card .card-sub { font-size: 12.5px; color: var(--text-secondary); margin: 0 0 16px; line-height: 1.5; }
+
+  .stat-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  .stat-tile {
+    flex: 1 1 140px;
+    background: var(--page);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .stat-tile .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 4px; }
+  .stat-tile .value { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .stat-tile .value.delta-up { color: var(--gas); }
+  .stat-tile .value.delta-down { color: var(--good); }
+  .stat-tile .sub { font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; }
+
+  .charts-row { display: flex; gap: 20px; flex-wrap: wrap; }
+  .chart-col { flex: 1 1 420px; min-width: 0; }
+  .chart-col h3 { font-size: 12.5px; font-weight: 650; margin: 0 0 8px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.02em; }
+
+  svg.merit-chart { width: 100%; height: auto; overflow: visible; }
+  .axis-label { font-size: 10.5px; fill: var(--muted); }
+  .grid-line { stroke: var(--grid); stroke-width: 1; }
+  .baseline-line { stroke: var(--baseline); stroke-width: 1; }
+  .demand-line { stroke: var(--text-primary); stroke-width: 1.5; stroke-dasharray: 3 3; }
+  .clear-point { stroke: var(--surface-1); stroke-width: 2px; }
+  .merit-block { stroke: var(--surface-1); stroke-width: 2px; cursor: pointer; }
+  .merit-block:hover { filter: brightness(1.08); }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 14px; font-size: 12px; color: var(--text-secondary); }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+
+  .tooltip {
+    position: fixed;
+    pointer-events: none;
+    background: var(--text-primary);
+    color: var(--surface-1);
+    font-size: 12px;
+    line-height: 1.45;
+    border-radius: 6px;
+    padding: 8px 10px;
+    max-width: 240px;
+    opacity: 0;
+    transition: opacity 0.1s;
+    z-index: 20;
+  }
+  .tooltip.visible { opacity: 1; }
+  .tooltip .t-title { font-weight: 650; margin-bottom: 2px; }
+  .tooltip .t-row { display: flex; justify-content: space-between; gap: 14px; color: var(--muted); }
+  .tooltip .t-row span:last-child { color: var(--surface-1); font-variant-numeric: tabular-nums; }
+
+  .explanation {
+    background: var(--page);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    font-size: 13.5px;
+    line-height: 1.7;
+    white-space: pre-line;
+  }
+
+  details.table-toggle { margin-top: 14px; }
+  details.table-toggle summary { cursor: pointer; font-size: 12.5px; color: var(--text-secondary); }
+  table.data-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 12.5px; }
+  table.data-table th, table.data-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--grid); }
+  table.data-table th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.02em; }
+  table.data-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .caveats { font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
+  .caveats ul { margin: 6px 0 0; padding-left: 18px; }
+  .disclaimer-banner {
+    background: var(--page);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--muted);
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 20px;
+  }
+
+  @media (max-width: 640px) {
+    .stat-row { flex-direction: column; }
+  }
+</style>
+
+<div class="viz-root">
+  <header class="page-head">
+    <h1>TradingSurv — Market Reconstruction &amp; Auction Simulator</h1>
+    <p id="subtitle"></p>
+  </header>
+
+  <div class="disclaimer-banner">
+    Estimated supply curve reconstructed from public ENTSO-E/Yahoo Finance data and calibrated against
+    <a href="#" style="color:inherit">epex_scraper</a>'s actual-price archive — not participant bid data.
+    Figures are directional, not a claim of what the real auction bid stack looked like. See caveats below.
+  </div>
+
+  <section class="card">
+    <h2 id="base-title"></h2>
+    <p class="card-sub" id="base-sub"></p>
+    <div class="stat-row" id="base-stats"></div>
+    <div class="chart-col" style="max-width:640px">
+      <svg class="merit-chart" id="chart-base" viewBox="0 0 640 320"></svg>
+    </div>
+    <div class="legend" id="legend-base"></div>
+    <details class="table-toggle">
+      <summary>View as table</summary>
+      <table class="data-table" id="table-base"></table>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2 id="scenario-title"></h2>
+    <p class="card-sub" id="scenario-sub"></p>
+    <div class="stat-row" id="scenario-stats"></div>
+    <div class="charts-row">
+      <div class="chart-col">
+        <h3>Before</h3>
+        <svg class="merit-chart" id="chart-before" viewBox="0 0 480 300"></svg>
+      </div>
+      <div class="chart-col">
+        <h3>After</h3>
+        <svg class="merit-chart" id="chart-after" viewBox="0 0 480 300"></svg>
+      </div>
+    </div>
+    <div class="legend" id="legend-scenario"></div>
+
+    <h3 style="margin-top:20px">Explanation</h3>
+    <div class="explanation" id="explanation-text"></div>
+
+    <details class="table-toggle">
+      <summary>View scenario supply stack as table</summary>
+      <table class="data-table" id="table-scenario"></table>
+    </details>
+  </section>
+
+  <section class="card caveats">
+    <h2>What this is (and isn't)</h2>
+    <ul>
+      <li>Supply is a technology-pooled fleet from ENTSO-E's aggregated capacity — not individual real generating units, so "remove a generator" here means "remove this zone's entire fleet of that technology."</li>
+      <li>Calibration is fit from a small archive (currently <span id="train-days-caveat"></span> usable days for this zone) — a real demonstration of the walk-forward method, not yet a statistically robust fit.</li>
+      <li>Coal/lignite/oil prices are flat placeholders; no free reliable public source was found for them yet.</li>
+      <li>This is an estimation and simulation tool, not a reconstruction of the real EUPHEMIA bid stack — no participant bids are used or assumed.</li>
+    </ul>
+  </section>
+
+  <div class="tooltip" id="tooltip"></div>
+</div>
+
+<script>
+const DATA = {"zone": "AT", "delivery_date": "2026-07-24", "hour": 20, "actual_price": 197.13, "baseline": {"price": 132.63, "volume": 7428.0, "marginal_technology": "hydro_reservoir", "marginal_asset_id": "AT:hydro-water-reservoir", "demand_mw": 7428.0, "supply_curve": [{"asset_id": "AT:wind-onshore", "name": "AT Wind Onshore fleet", "technology": "wind_onshore", "cumulative_mw": 704.0, "capacity_mw": 704.0, "marginal_cost": 0.0, "owner": null}, {"asset_id": "AT:energy-storage", "name": "AT Energy storage fleet", "technology": "battery", "cumulative_mw": 1804.0, "capacity_mw": 1100.0, "marginal_cost": 5.0, "owner": null}, {"asset_id": "AT:biomass", "name": "AT Biomass fleet", "technology": "biomass", "cumulative_mw": 2381.0, "capacity_mw": 577.0, "marginal_cost": 80.0, "owner": null}, {"asset_id": "AT:other", "name": "AT Other fleet", "technology": "other", "cumulative_mw": 3232.0, "capacity_mw": 851.0, "marginal_cost": 80.0, "owner": null}, {"asset_id": "AT:waste", "name": "AT Waste fleet", "technology": "other", "cumulative_mw": 3356.0, "capacity_mw": 124.0, "marginal_cost": 80.0, "owner": null}, {"asset_id": "AT:hydro-run-of-river-and-poundage", "name": "AT Hydro Run-of-river and poundage fleet", "technology": "hydro_ror", "cumulative_mw": 5741.6, "capacity_mw": 2385.6, "marginal_cost": 128.09, "owner": null}, {"asset_id": "AT:hydro-water-reservoir", "name": "AT Hydro Water Reservoir fleet", "technology": "hydro_reservoir", "cumulative_mw": 8288.6, "capacity_mw": 2547.0, "marginal_cost": 132.63, "owner": null}, {"asset_id": "AT:solar", "name": "AT Solar fleet", "technology": "solar", "cumulative_mw": 8320.6, "capacity_mw": 32.0, "marginal_cost": 132.8, "owner": null}, {"asset_id": "AT:hydro-pumped-storage", "name": "AT Hydro Pumped Storage fleet", "technology": "hydro_pumped", "cumulative_mw": 12342.6, "capacity_mw": 4022.0, "marginal_cost": 150.3025, "owner": null}, {"asset_id": "AT:fossil-gas", "name": "AT Fossil Gas fleet", "technology": "gas", "cumulative_mw": 16618.6, "capacity_mw": 4276.0, "marginal_cost": 161.07812103271485, "owner": null}, {"asset_id": "AT:fossil-oil", "name": "AT Fossil Oil fleet", "technology": "oil", "cumulative_mw": 16743.6, "capacity_mw": 125.0, "marginal_cost": 193.5696275983538, "owner": null}]}, "scenario": {"label": "Remove AT Hydro Run-of-river and poundage fleet", "removed_asset_id": "AT:hydro-run-of-river-and-poundage", "old_price": 132.63, "new_price": 150.3025, "price_diff": 17.672500000000014, "old_volume": 7428.0, "new_volume": 7428.0, "old_marginal_technology": "hydro_reservoir", "new_marginal_technology": "hydro_pumped", "demand_mw": 7428.0, "supply_curve": [{"asset_id": "AT:wind-onshore", "name": "AT Wind Onshore fleet", "technology": "wind_onshore", "cumulative_mw": 704.0, "capacity_mw": 704.0, "marginal_cost": 0.0, "owner": null}, {"asset_id": "AT:energy-storage", "name": "AT Energy storage fleet", "technology": "battery", "cumulative_mw": 1804.0, "capacity_mw": 1100.0, "marginal_cost": 5.0, "owner": null}, {"asset_id": "AT:biomass", "name": "AT Biomass fleet", "technology": "biomass", "cumulative_mw": 2381.0, "capacity_mw": 577.0, "marginal_cost": 80.0, "owner": null}, {"asset_id": "AT:other", "name": "AT Other fleet", "technology": "other", "cumulative_mw": 3232.0, "capacity_mw": 851.0, "marginal_cost": 80.0, "owner": null}, {"asset_id": "AT:waste", "name": "AT Waste fleet", "technology": "other", "cumulative_mw": 3356.0, "capacity_mw": 124.0, "marginal_cost": 80.0, "owner": null}, {"asset_id": "AT:hydro-water-reservoir", "name": "AT Hydro Water Reservoir fleet", "technology": "hydro_reservoir", "cumulative_mw": 5903.0, "capacity_mw": 2547.0, "marginal_cost": 132.63, "owner": null}, {"asset_id": "AT:solar", "name": "AT Solar fleet", "technology": "solar", "cumulative_mw": 5935.0, "capacity_mw": 32.0, "marginal_cost": 132.8, "owner": null}, {"asset_id": "AT:hydro-pumped-storage", "name": "AT Hydro Pumped Storage fleet", "technology": "hydro_pumped", "cumulative_mw": 9957.0, "capacity_mw": 4022.0, "marginal_cost": 150.3025, "owner": null}, {"asset_id": "AT:fossil-gas", "name": "AT Fossil Gas fleet", "technology": "gas", "cumulative_mw": 14233.0, "capacity_mw": 4276.0, "marginal_cost": 161.07812103271485, "owner": null}, {"asset_id": "AT:fossil-oil", "name": "AT Fossil Oil fleet", "technology": "oil", "cumulative_mw": 14358.0, "capacity_mw": 125.0, "marginal_cost": 193.5696275983538, "owner": null}], "drivers": [{"description": "AT Hydro Run-of-river and poundage fleet (5937 MW hydro_ror) removed", "impact": 17.672500000000014}], "explanation": "Price increased from \u20ac133/MWh to \u20ac150/MWh.\n\nhydro_pumped became marginal (was hydro_reservoir).\n\nPrimary drivers:\n\u2022 AT Hydro Run-of-river and poundage fleet (5937 MW hydro_ror) removed (+17.67 EUR/MWh)"}, "offsets": {"hydro_ror": 128.09, "solar": 132.8}, "water_values": {"hydro_reservoir": 132.63, "hydro_pumped": 150.3025}, "train_days": 5};
+
+const COLOR_VAR = {
+  hydro_ror: '--hydro-ror', gas: '--gas', hydro_reservoir: '--hydro-res',
+  solar: '--solar', hydro_pumped: '--hydro-pump', wind_onshore: '--wind',
+  wind_offshore: '--wind', battery: '--battery', oil: '--oil', import: '--import',
+};
+const LABEL = {
+  hydro_ror: 'Hydro (run-of-river)', gas: 'Gas', hydro_reservoir: 'Hydro (reservoir)',
+  solar: 'Solar', hydro_pumped: 'Hydro (pumped storage)', wind_onshore: 'Wind',
+  wind_offshore: 'Wind (offshore)', battery: 'Battery', oil: 'Oil', biomass: 'Biomass',
+  other: 'Other', import: 'Import',
+};
+
+function colorFor(tech) {
+  const varName = COLOR_VAR[tech];
+  return varName ? `var(${varName})` : 'var(--other)';
+}
+function labelFor(tech) { return LABEL[tech] || tech; }
+
+function fmt(n, d = 0) { return Number(n).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }); }
+
+const tooltipEl = document.getElementById('tooltip');
+function showTooltip(evt, point) {
+  tooltipEl.innerHTML = `
+    <div class="t-title">${point.name}</div>
+    <div class="t-row"><span>Technology</span><span>${labelFor(point.technology)}</span></div>
+    <div class="t-row"><span>Capacity</span><span>${fmt(point.capacity_mw)} MW</span></div>
+    <div class="t-row"><span>Marginal cost</span><span>€${fmt(point.marginal_cost, 2)}/MWh</span></div>
+  `;
+  tooltipEl.classList.add('visible');
+  moveTooltip(evt);
+}
+function moveTooltip(evt) {
+  tooltipEl.style.left = (evt.clientX + 14) + 'px';
+  tooltipEl.style.top = (evt.clientY + 14) + 'px';
+}
+function hideTooltip() { tooltipEl.classList.remove('visible'); }
+
+function renderMeritChart(svgEl, points, demandMw, clearingPrice, viewW, viewH) {
+  const padL = 46, padB = 26, padT = 10, padR = 10;
+  const w = viewW - padL - padR, h = viewH - padT - padB;
+
+  const xMax = Math.max(points[points.length - 1].cumulative_mw, demandMw) * 1.04;
+  const yMax = Math.max(...points.map(p => p.marginal_cost), clearingPrice) * 1.18 || 10;
+
+  const sx = mw => padL + (mw / xMax) * w;
+  const sy = price => padT + h - (price / yMax) * h;
+
+  svgEl.setAttribute('viewBox', `0 0 ${viewW} ${viewH}`);
+  svgEl.innerHTML = '';
+
+  const ns = 'http://www.w3.org/2000/svg';
+  const g = document.createElementNS(ns, 'g');
+
+  // gridlines (y)
+  const yTicks = 4;
+  for (let i = 0; i <= yTicks; i++) {
+    const price = (yMax / yTicks) * i;
+    const y = sy(price);
+    const line = document.createElementNS(ns, 'line');
+    line.setAttribute('x1', padL); line.setAttribute('x2', padL + w);
+    line.setAttribute('y1', y); line.setAttribute('y2', y);
+    line.setAttribute('class', 'grid-line');
+    g.appendChild(line);
+    const label = document.createElementNS(ns, 'text');
+    label.setAttribute('x', padL - 8); label.setAttribute('y', y + 3);
+    label.setAttribute('text-anchor', 'end'); label.setAttribute('class', 'axis-label');
+    label.textContent = '€' + fmt(price);
+    g.appendChild(label);
+  }
+
+  // baseline axis
+  const axis = document.createElementNS(ns, 'line');
+  axis.setAttribute('x1', padL); axis.setAttribute('x2', padL + w);
+  axis.setAttribute('y1', padT + h); axis.setAttribute('y2', padT + h);
+  axis.setAttribute('class', 'baseline-line');
+  g.appendChild(axis);
+
+  // merit blocks
+  let prevCum = 0;
+  for (const p of points) {
+    const x0 = sx(prevCum), x1 = sx(p.cumulative_mw);
+    const y0 = sy(p.marginal_cost), y1 = sy(0);
+    const rect = document.createElementNS(ns, 'rect');
+    rect.setAttribute('x', x0);
+    rect.setAttribute('y', y0);
+    rect.setAttribute('width', Math.max(x1 - x0 - 1, 0));
+    rect.setAttribute('height', Math.max(y1 - y0, 0));
+    rect.setAttribute('fill', colorFor(p.technology));
+    rect.setAttribute('rx', 2);
+    rect.setAttribute('class', 'merit-block');
+    rect.addEventListener('mousemove', e => showTooltip(e, p));
+    rect.addEventListener('mouseleave', hideTooltip);
+    g.appendChild(rect);
+    prevCum = p.cumulative_mw;
+  }
+
+  // demand line
+  const dx = sx(demandMw);
+  const dline = document.createElementNS(ns, 'line');
+  dline.setAttribute('x1', dx); dline.setAttribute('x2', dx);
+  dline.setAttribute('y1', padT); dline.setAttribute('y2', padT + h);
+  dline.setAttribute('class', 'demand-line');
+  g.appendChild(dline);
+  const dlabel = document.createElementNS(ns, 'text');
+  dlabel.setAttribute('x', dx); dlabel.setAttribute('y', padT + 10);
+  dlabel.setAttribute('text-anchor', dx > padL + w * 0.7 ? 'end' : 'start');
+  dlabel.setAttribute('class', 'axis-label');
+  dlabel.textContent = 'Demand ' + fmt(demandMw) + ' MW';
+  g.appendChild(dlabel);
+
+  // clearing point
+  const cx = dx, cy = sy(clearingPrice);
+  const point = document.createElementNS(ns, 'circle');
+  point.setAttribute('cx', cx); point.setAttribute('cy', cy); point.setAttribute('r', 5);
+  point.setAttribute('fill', 'var(--text-primary)');
+  point.setAttribute('class', 'clear-point');
+  g.appendChild(point);
+
+  // x axis label
+  const xlabel = document.createElementNS(ns, 'text');
+  xlabel.setAttribute('x', padL + w / 2); xlabel.setAttribute('y', viewH - 4);
+  xlabel.setAttribute('text-anchor', 'middle'); xlabel.setAttribute('class', 'axis-label');
+  xlabel.textContent = 'Cumulative capacity (MW)';
+  g.appendChild(xlabel);
+
+  svgEl.appendChild(g);
+}
+
+function renderLegend(container, technologies) {
+  container.innerHTML = '';
+  const seen = new Set();
+  for (const t of technologies) {
+    const key = LABEL[t] ? t : 'other';
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const item = document.createElement('div');
+    item.className = 'legend-item';
+    item.innerHTML = `<span class="legend-swatch" style="background:${colorFor(t)}"></span>${labelFor(t)}`;
+    container.appendChild(item);
+  }
+}
+
+function renderTable(tableEl, points) {
+  tableEl.innerHTML = `
+    <thead><tr><th>Asset</th><th>Technology</th><th class="num">Capacity (MW)</th>
+    <th class="num">Cumulative (MW)</th><th class="num">Marginal cost (€/MWh)</th></tr></thead>
+    <tbody>${points.map(p => `
+      <tr><td>${p.name}</td><td>${labelFor(p.technology)}</td>
+      <td class="num">${fmt(p.capacity_mw)}</td><td class="num">${fmt(p.cumulative_mw)}</td>
+      <td class="num">${fmt(p.marginal_cost, 2)}</td></tr>`).join('')}
+    </tbody>`;
+}
+
+function statTile(label, value, sub, deltaClass) {
+  const el = document.createElement('div');
+  el.className = 'stat-tile';
+  el.innerHTML = `<div class="label">${label}</div><div class="value ${deltaClass || ''}">${value}</div>${sub ? `<div class="sub">${sub}</div>` : ''}`;
+  return el;
+}
+
+// ---- populate page ----
+document.getElementById('subtitle').textContent =
+  `${DATA.zone} — ${DATA.delivery_date}, hour ${DATA.hour}:00 — calibrated against epex_scraper's actual-price archive (${DATA.train_days} archived day(s) used)`;
+
+document.getElementById('base-title').textContent = 'Base auction reconstruction';
+document.getElementById('base-sub').textContent =
+  `Merit-order supply curve intersected with estimated demand at ${DATA.zone} ${DATA.delivery_date} ${DATA.hour}:00.`;
+
+const baseStats = document.getElementById('base-stats');
+baseStats.appendChild(statTile('Estimated price', `€${fmt(DATA.baseline.price, 2)}`, 'calibrated'));
+baseStats.appendChild(statTile('Actual settled price', `€${fmt(DATA.actual_price, 2)}`, 'epex_scraper archive'));
+baseStats.appendChild(statTile('Marginal technology', labelFor(DATA.baseline.marginal_technology)));
+baseStats.appendChild(statTile('Cleared volume', `${fmt(DATA.baseline.volume)} MW`));
+
+renderMeritChart(document.getElementById('chart-base'), DATA.baseline.supply_curve, DATA.baseline.demand_mw, DATA.baseline.price, 640, 320);
+renderLegend(document.getElementById('legend-base'), DATA.baseline.supply_curve.map(p => p.technology));
+renderTable(document.getElementById('table-base'), DATA.baseline.supply_curve);
+
+document.getElementById('scenario-title').textContent = 'Simulation: ' + DATA.scenario.label;
+document.getElementById('scenario-sub').textContent =
+  'Counterfactual — the same hour, with this action applied. Recomputed instantly from the base snapshot.';
+
+const scenarioStats = document.getElementById('scenario-stats');
+const priceUp = DATA.scenario.price_diff > 0;
+scenarioStats.appendChild(statTile('Old price', `€${fmt(DATA.scenario.old_price, 2)}`));
+scenarioStats.appendChild(statTile('New price', `€${fmt(DATA.scenario.new_price, 2)}`, null, priceUp ? 'delta-up' : 'delta-down'));
+scenarioStats.appendChild(statTile('Price change', `${priceUp ? '+' : ''}€${fmt(DATA.scenario.price_diff, 2)}`, null, priceUp ? 'delta-up' : 'delta-down'));
+scenarioStats.appendChild(statTile('Marginal technology', `${labelFor(DATA.scenario.old_marginal_technology)} → ${labelFor(DATA.scenario.new_marginal_technology)}`));
+
+renderMeritChart(document.getElementById('chart-before'), DATA.baseline.supply_curve, DATA.baseline.demand_mw, DATA.baseline.price, 480, 300);
+renderMeritChart(document.getElementById('chart-after'), DATA.scenario.supply_curve, DATA.scenario.demand_mw, DATA.scenario.new_price, 480, 300);
+renderLegend(document.getElementById('legend-scenario'), DATA.scenario.supply_curve.map(p => p.technology));
+renderTable(document.getElementById('table-scenario'), DATA.scenario.supply_curve);
+
+document.getElementById('explanation-text').textContent = DATA.scenario.explanation;
+document.getElementById('train-days-caveat').textContent = DATA.train_days;
+
+document.addEventListener('mousemove', e => {
+  if (tooltipEl.classList.contains('visible')) moveTooltip(e);
+});
+</script>
+
+</body>
+</html>

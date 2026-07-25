@@ -13,10 +13,18 @@ docs/tradingsurv/ARCHITECTURE.md.
 
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 
 from ..costs.hydro import PUMPED_STORAGE, RESERVOIR, RUN_OF_RIVER
 from .models import GenerationAsset
+
+_SLUG_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify(text: str) -> str:
+    return _SLUG_NON_ALNUM.sub("-", text.lower()).strip("-")
 
 # ENTSO-E "Production Type" -> tradingsurv technology id. Fossil Gas/Coal-derived
 # gas collapse to one "gas" bucket, and Hard coal/Lignite/Oil shale to their
@@ -49,10 +57,18 @@ TECHNOLOGY_MAP: dict[str, str] = {
 
 
 def build_pooled_fleet(zone: str, aggregated_capacity: pd.Series) -> list[GenerationAsset]:
-    """One ``GenerationAsset`` per non-zero (zone, technology) bucket.
+    """One ``GenerationAsset`` per non-zero ENTSO-E production type.
 
     ``aggregated_capacity`` is what ``EntsoeClient.installed_capacity_aggregated``
     returns: an index of ENTSO-E production-type labels to installed MW.
+
+    ``id`` is keyed off the raw production type, not the collapsed
+    ``technology`` bucket — several production types map to the same
+    tradingsurv technology (e.g. "Other" and "Waste" both -> "other"; "Fossil
+    Gas" and "Fossil Coal-derived gas" both -> "gas"), and a technology-keyed
+    id would collide between them, silently merging two distinct assets
+    under simulation actions like ``RemoveGenerator``/``without_asset``
+    (which matches by id).
     """
     assets = []
     for production_type, capacity_mw in aggregated_capacity.items():
@@ -62,7 +78,7 @@ def build_pooled_fleet(zone: str, aggregated_capacity: pd.Series) -> list[Genera
         technology = TECHNOLOGY_MAP.get(production_type, "other")
         assets.append(
             GenerationAsset(
-                id=f"{zone}:{technology}",
+                id=f"{zone}:{_slugify(production_type)}",
                 zone=zone,
                 name=f"{zone} {production_type} fleet",
                 technology=technology,
