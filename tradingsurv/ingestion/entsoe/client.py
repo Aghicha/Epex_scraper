@@ -52,10 +52,31 @@ class EntsoeClient:
     def installed_capacity_per_unit(
         self, zone: str, start: pd.Timestamp, end: pd.Timestamp
     ) -> pd.DataFrame:
-        """Per-unit installed capacity — the primary asset-registry source (Step 1)."""
+        """Per-unit installed capacity. Only covers larger/individually-tracked
+        plants (for AT: hydro + gas) — wind/solar/biomass are disclosed only
+        in aggregate, see :meth:`installed_capacity_aggregated`."""
         return self._client.query_installed_generation_capacity_per_unit(
             self._resolve_zone(zone), start=start, end=end
         )
+
+    def installed_capacity_aggregated(
+        self, zone: str, start: pd.Timestamp, end: pd.Timestamp
+    ) -> pd.Series:
+        """Installed capacity per technology (Production Type), zone-wide total.
+
+        The primary asset-registry source for Phase 0 (see
+        ``domain/assets/registry.py``) — complete across all technologies,
+        unlike the per-unit endpoint above.
+        """
+        df = self._client.query_installed_generation_capacity(self._resolve_zone(zone), start=start, end=end)
+        return df.iloc[0]
+
+    def wind_and_solar_forecast(self, zone: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        """Day-ahead wind/solar generation forecast — the public-data proxy for
+        those technologies' available capacity in the merit order (Step 6.1:
+        their marginal cost is ~0, so forecast output *is* their supply
+        offer, not nameplate capacity)."""
+        return self._client.query_wind_and_solar_forecast(self._resolve_zone(zone), start=start, end=end)
 
     def unavailability_of_generation_units(
         self, zone: str, start: pd.Timestamp, end: pd.Timestamp
