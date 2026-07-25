@@ -6,6 +6,7 @@ demand, gas/CO2 price, or interconnection:
   - ENTSO-E aggregated installed capacity -> pooled fleet per technology
   - ENTSO-E day-ahead load forecast       -> hourly demand
   - ENTSO-E wind/solar generation forecast -> hourly wind/solar availability
+  - ENTSO-E actual generation             -> hourly hydro run-of-river availability
   - ENTSO-E net position                  -> hourly net import/export (Step 5)
   - Yahoo Finance TTF gas / EUA carbon proxies -> gas_eur_mwh_th / co2_eur_t
     (see ingestion/fuel_co2/prices.py for why these specific tickers)
@@ -13,11 +14,25 @@ demand, gas/CO2 price, or interconnection:
     REFERENCE_ZONE (the neighbor whose price stands in for imports, see
     domain/interconnectors/model.py), and for comparison
 
+Hydro run-of-river gets *actual* (ex-post) generation as its availability
+cap, not a forecast — ENTSO-E doesn't publish a per-technology day-ahead
+hydro forecast the way it does for wind/solar. Justified because RoR output
+is overwhelmingly flow-constrained (whatever the river allows, run
+near-continuously) rather than a price-responsive economic dispatch
+decision, so actual generation is a reasonable physical-availability proxy
+even though it's ex-post — a documented MVP simplification, not something
+Step 9's forward-looking simulator could use as-is. Reservoir/pumped storage
+deliberately do *not* get this treatment: their real constraint is
+economic (a water value/opportunity cost), not physical availability, so
+capping them by past output would hide exactly the calibration Step 7 is
+supposed to fit — they stay at full nameplate, uncalibrated, until then.
+
 What's still a placeholder: coal/lignite/oil prices (flat constants below —
 no free reliable source found, see ingestion/fuel_co2/prices.py) and
-hydro/battery water values (default to 0, i.e. uncalibrated — Step 7 fits
-these from history). AT's own fleet has no coal/lignite/nuclear, so the coal
-placeholder specifically doesn't affect this zone's reconstruction.
+hydro reservoir/pumped-storage water values (default to 0, i.e.
+uncalibrated — Step 7 fits these from history). AT's own fleet has no
+coal/lignite/nuclear, so the coal placeholder specifically doesn't affect
+this zone's reconstruction.
 
 Requires ENTSOE_API_TOKEN (see .env.example).
 
@@ -35,6 +50,7 @@ import pandas as pd
 from ..domain.assets.registry import build_pooled_fleet
 from ..domain.clearing.solver import clear
 from ..domain.costs.estimate import FuelPrices, estimate_marginal_costs
+from ..domain.costs.hydro import RUN_OF_RIVER
 from ..domain.demand.curve import DemandCurve
 from ..domain.interconnectors.model import export_demand_mw, import_supply_asset
 from ..domain.merit_order.builder import build_supply_curve
@@ -65,6 +81,11 @@ def _current_fuel_prices() -> FuelPrices:
 
 # tradingsurv technology id -> the column name ENTSO-E's wind/solar forecast uses.
 WEATHER_DRIVEN_COLUMNS = {"wind_onshore": "Wind Onshore", "wind_offshore": "Wind Offshore", "solar": "Solar"}
+
+# The (production type, metric) column ENTSO-E's actual-generation endpoint
+# uses for hydro run-of-river — see module docstring for why actual (not
+# forecast) is used here specifically.
+RUN_OF_RIVER_ACTUAL_COLUMN = ("Hydro Run-of-river and poundage", "Actual Aggregated")
 
 
 def _nearest(series: pd.Series, timestamp: pd.Timestamp) -> float:
@@ -97,6 +118,13 @@ def reconstruct_day(zone: str, delivery_date: date, data_root: Path) -> list[dic
 
     wind_solar = client.wind_and_solar_forecast(zone, day_start, day_end)
 
+    generation_actual = client.generation_actual(zone, day_start, day_end)
+    ror_actual = (
+        generation_actual[RUN_OF_RIVER_ACTUAL_COLUMN]
+        if RUN_OF_RIVER_ACTUAL_COLUMN in generation_actual.columns
+        else None
+    )
+
     net_position = client.net_position(zone, day_start, day_end)
     reference_prices = (
         read_actual_day_ahead_prices(data_root, REFERENCE_ZONE, delivery_date, resolution=60)
@@ -113,6 +141,8 @@ def reconstruct_day(zone: str, delivery_date: date, data_root: Path) -> list[dic
             column = WEATHER_DRIVEN_COLUMNS.get(asset.technology)
             if column is not None and column in wind_solar.columns:
                 available_mw[asset.id] = _nearest(wind_solar[column], ts)
+            elif asset.technology == RUN_OF_RIVER and ror_actual is not None:
+                available_mw[asset.id] = _nearest(ror_actual, ts)
 
         hour_assets = list(assets)
         hour_costs = dict(costs)
