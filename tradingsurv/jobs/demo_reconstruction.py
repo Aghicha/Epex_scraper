@@ -24,15 +24,14 @@ even though it's ex-post — a documented MVP simplification, not something
 Step 9's forward-looking simulator could use as-is. Reservoir/pumped storage
 deliberately do *not* get this treatment: their real constraint is
 economic (a water value/opportunity cost), not physical availability, so
-capping them by past output would hide exactly the calibration Step 7 is
-supposed to fit — they stay at full nameplate, uncalibrated, until then.
+capping them by past output would hide exactly what Step 7 calibration
+(tradingsurv/jobs/calibrate.py) is supposed to fit.
 
 What's still a placeholder: coal/lignite/oil prices (flat constants below —
-no free reliable source found, see ingestion/fuel_co2/prices.py) and
-hydro reservoir/pumped-storage water values (default to 0, i.e.
-uncalibrated — Step 7 fits these from history). AT's own fleet has no
-coal/lignite/nuclear, so the coal placeholder specifically doesn't affect
-this zone's reconstruction.
+no free reliable source found, see ingestion/fuel_co2/prices.py). Hydro
+reservoir/pumped-storage water values and per-technology offsets default to
+0/uncalibrated here — pass ``offsets``/``water_values`` (as fitted by
+calibrate.py) to ``clear_day`` to apply them.
 
 Requires ENTSOE_API_TOKEN (see .env.example).
 
@@ -42,11 +41,13 @@ Run: python -m tradingsurv.jobs.demo_reconstruction --zone AT --date 2026-07-24
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
+from ..domain.assets.models import GenerationAsset
 from ..domain.assets.registry import build_pooled_fleet
 from ..domain.clearing.solver import clear
 from ..domain.costs.estimate import FuelPrices, estimate_marginal_costs
@@ -69,6 +70,14 @@ PLACEHOLDER_OIL_EUR_MWH_TH = 45.0
 # ATC). Only meaningful when reconstructing a zone other than this one.
 REFERENCE_ZONE = "DE-LU"
 
+# tradingsurv technology id -> the column name ENTSO-E's wind/solar forecast uses.
+WEATHER_DRIVEN_COLUMNS = {"wind_onshore": "Wind Onshore", "wind_offshore": "Wind Offshore", "solar": "Solar"}
+
+# The (production type, metric) column ENTSO-E's actual-generation endpoint
+# uses for hydro run-of-river — see module docstring for why actual (not
+# forecast) is used here specifically.
+RUN_OF_RIVER_ACTUAL_COLUMN = ("Hydro Run-of-river and poundage", "Actual Aggregated")
+
 
 def _current_fuel_prices() -> FuelPrices:
     return FuelPrices(
@@ -79,14 +88,6 @@ def _current_fuel_prices() -> FuelPrices:
         co2_eur_t=fuel_co2_prices.co2_price_eur_t(),
     )
 
-# tradingsurv technology id -> the column name ENTSO-E's wind/solar forecast uses.
-WEATHER_DRIVEN_COLUMNS = {"wind_onshore": "Wind Onshore", "wind_offshore": "Wind Offshore", "solar": "Solar"}
-
-# The (production type, metric) column ENTSO-E's actual-generation endpoint
-# uses for hydro run-of-river — see module docstring for why actual (not
-# forecast) is used here specifically.
-RUN_OF_RIVER_ACTUAL_COLUMN = ("Hydro Run-of-river and poundage", "Actual Aggregated")
-
 
 def _nearest(series: pd.Series, timestamp: pd.Timestamp) -> float:
     """Nearest-in-time lookup — forecast series resolution (15/30/60 min)
@@ -95,7 +96,26 @@ def _nearest(series: pd.Series, timestamp: pd.Timestamp) -> float:
     return float(series.iloc[idx])
 
 
-def reconstruct_day(zone: str, delivery_date: date, data_root: Path) -> list[dict]:
+@dataclass(frozen=True)
+class DayContext:
+    """Everything fetched over the network for one (zone, day) — separated
+    from ``clear_day``'s pure computation so a caller that needs multiple
+    passes (e.g. calibrate.py's uncalibrated-then-calibrated comparison)
+    fetches once and clears twice, instead of hitting ENTSO-E redundantly.
+    """
+
+    zone: str
+    actual: dict
+    assets: list[GenerationAsset]
+    fuel_prices: FuelPrices
+    load_series: pd.Series
+    wind_solar: pd.DataFrame
+    ror_actual: pd.Series | None
+    net_position: pd.Series
+    reference_prices: dict
+
+
+def fetch_day_context(zone: str, delivery_date: date, data_root: Path) -> DayContext:
     actual = read_actual_day_ahead_prices(data_root, zone, delivery_date, resolution=60)
     if not actual:
         raise SystemExit(
@@ -110,12 +130,8 @@ def reconstruct_day(zone: str, delivery_date: date, data_root: Path) -> list[dic
     capacity = client.installed_capacity_aggregated(zone, day_start, day_end)
     assets = build_pooled_fleet(zone, capacity)
     fuel_prices = _current_fuel_prices()
-    print(f"gas: {fuel_prices.gas_eur_mwh_th:.2f} EUR/MWh_th, CO2: {fuel_prices.co2_eur_t:.2f} EUR/t (live)\n")
-    costs = estimate_marginal_costs(assets, fuel_prices)
 
-    load_forecast = client.load_forecast(zone, day_start, day_end)
-    load_series = load_forecast.iloc[:, 0]  # "Forecasted Load"
-
+    load_series = client.load_forecast(zone, day_start, day_end).iloc[:, 0]  # "Forecasted Load"
     wind_solar = client.wind_and_solar_forecast(zone, day_start, day_end)
 
     generation_actual = client.generation_actual(zone, day_start, day_end)
@@ -132,25 +148,40 @@ def reconstruct_day(zone: str, delivery_date: date, data_root: Path) -> list[dic
         else {}
     )
 
+    return DayContext(
+        zone=zone, actual=actual, assets=assets, fuel_prices=fuel_prices,
+        load_series=load_series, wind_solar=wind_solar, ror_actual=ror_actual,
+        net_position=net_position, reference_prices=reference_prices,
+    )
+
+
+def clear_day(
+    context: DayContext,
+    offsets: dict[str, float] | None = None,
+    water_values: dict[str, float] | None = None,
+) -> list[dict]:
+    """Pure: clear every hour of an already-fetched day. No network calls."""
+    costs = estimate_marginal_costs(context.assets, context.fuel_prices, water_value_eur_mwh=water_values, offsets=offsets)
+
     rows = []
-    for period_start in sorted(actual):
+    for period_start in sorted(context.actual):
         ts = pd.Timestamp(period_start, tz="Europe/Vienna")
 
         available_mw = {}
-        for asset in assets:
+        for asset in context.assets:
             column = WEATHER_DRIVEN_COLUMNS.get(asset.technology)
-            if column is not None and column in wind_solar.columns:
-                available_mw[asset.id] = _nearest(wind_solar[column], ts)
-            elif asset.technology == RUN_OF_RIVER and ror_actual is not None:
-                available_mw[asset.id] = _nearest(ror_actual, ts)
+            if column is not None and column in context.wind_solar.columns:
+                available_mw[asset.id] = _nearest(context.wind_solar[column], ts)
+            elif asset.technology == RUN_OF_RIVER and context.ror_actual is not None:
+                available_mw[asset.id] = _nearest(context.ror_actual, ts)
 
-        hour_assets = list(assets)
+        hour_assets = list(context.assets)
         hour_costs = dict(costs)
-        net_position_mw = _nearest(net_position, ts)
-        reference_price = reference_prices.get(period_start)
+        net_position_mw = _nearest(context.net_position, ts)
+        reference_price = context.reference_prices.get(period_start)
 
         if reference_price is not None:
-            import_asset = import_supply_asset(zone, net_position_mw)
+            import_asset = import_supply_asset(context.zone, net_position_mw)
             if import_asset is not None:
                 hour_assets.append(import_asset)
                 hour_costs[import_asset.id] = reference_price
@@ -158,21 +189,28 @@ def reconstruct_day(zone: str, delivery_date: date, data_root: Path) -> list[dic
         # skipped for it rather than guessed; net_position_mw is still
         # reported below so the gap is visible, not silently absorbed.
 
-        demand_mw = _nearest(load_series, ts) + export_demand_mw(net_position_mw)
+        demand_mw = _nearest(context.load_series, ts) + export_demand_mw(net_position_mw)
         supply = build_supply_curve(hour_assets, hour_costs, available_mw=available_mw)
-        demand = DemandCurve(base_mw=demand_mw, reference_price_eur_mwh=actual[period_start])
+        demand = DemandCurve(base_mw=demand_mw, reference_price_eur_mwh=context.actual[period_start])
         result = clear(supply, demand)
 
         rows.append({
             "hour": period_start.hour,
+            "period_start": period_start,
             "estimated_price": result.price_eur_mwh,
-            "actual_price": actual[period_start],
-            "price_error": result.price_eur_mwh - actual[period_start],
+            "actual_price": context.actual[period_start],
+            "price_error": result.price_eur_mwh - context.actual[period_start],
             "marginal_technology": result.marginal_technology,
             "demand_mw": demand.base_mw,
             "net_position_mw": net_position_mw,
         })
     return rows
+
+
+def reconstruct_day(zone: str, delivery_date: date, data_root: Path) -> list[dict]:
+    context = fetch_day_context(zone, delivery_date, data_root)
+    print(f"gas: {context.fuel_prices.gas_eur_mwh_th:.2f} EUR/MWh_th, CO2: {context.fuel_prices.co2_eur_t:.2f} EUR/t (live)\n")
+    return clear_day(context)
 
 
 def main() -> None:
