@@ -46,3 +46,14 @@ def test_unknown_production_type_falls_back_to_other():
     series = pd.Series({"Some New Tech ENTSO-E Adds Later": 100.0})
     assets = build_pooled_fleet("AT", series)
     assert assets[0].technology == "other"
+
+
+def test_distinct_production_types_mapping_to_same_technology_get_distinct_ids():
+    # "Other" and "Waste" both collapse to technology "other" (TECHNOLOGY_MAP)
+    # — a real collision found in production against real AT data, where an
+    # id keyed off the collapsed technology merged two distinct assets.
+    series = pd.Series({"Other": 851.0, "Waste": 124.0})
+    assets = build_pooled_fleet("AT", series)
+    ids = [a.id for a in assets]
+    assert len(ids) == len(set(ids)) == 2
+    assert all(a.technology == "other" for a in assets)
