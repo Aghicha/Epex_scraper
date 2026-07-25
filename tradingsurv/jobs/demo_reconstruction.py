@@ -2,13 +2,16 @@
 and compare to the actual settled price.
 
 Real public data feeds this, no synthetic placeholders left for the fleet,
-demand, or gas/CO2 price:
+demand, gas/CO2 price, or interconnection:
   - ENTSO-E aggregated installed capacity -> pooled fleet per technology
   - ENTSO-E day-ahead load forecast       -> hourly demand
   - ENTSO-E wind/solar generation forecast -> hourly wind/solar availability
+  - ENTSO-E net position                  -> hourly net import/export (Step 5)
   - Yahoo Finance TTF gas / EUA carbon proxies -> gas_eur_mwh_th / co2_eur_t
     (see ingestion/fuel_co2/prices.py for why these specific tickers)
-  - epex_scraper's own archive            -> actual price, for comparison
+  - epex_scraper's own archive            -> actual price for both `zone` and
+    REFERENCE_ZONE (the neighbor whose price stands in for imports, see
+    domain/interconnectors/model.py), and for comparison
 
 What's still a placeholder: coal/lignite/oil prices (flat constants below —
 no free reliable source found, see ingestion/fuel_co2/prices.py) and
@@ -33,6 +36,7 @@ from ..domain.assets.registry import build_pooled_fleet
 from ..domain.clearing.solver import clear
 from ..domain.costs.estimate import FuelPrices, estimate_marginal_costs
 from ..domain.demand.curve import DemandCurve
+from ..domain.interconnectors.model import export_demand_mw, import_supply_asset
 from ..domain.merit_order.builder import build_supply_curve
 from ..ingestion.entsoe.client import EntsoeClient
 from ..ingestion.fuel_co2 import prices as fuel_co2_prices
@@ -43,6 +47,11 @@ from ..ingestion.market_prices.epex_reader import read_actual_day_ahead_prices
 PLACEHOLDER_COAL_EUR_MWH_TH = 15.0
 PLACEHOLDER_LIGNITE_EUR_MWH_TH = 8.0
 PLACEHOLDER_OIL_EUR_MWH_TH = 45.0
+
+# AT's dominant coupling partner by flow volume (see
+# domain/interconnectors/model.py for why one reference zone, not per-border
+# ATC). Only meaningful when reconstructing a zone other than this one.
+REFERENCE_ZONE = "DE-LU"
 
 
 def _current_fuel_prices() -> FuelPrices:
@@ -88,6 +97,13 @@ def reconstruct_day(zone: str, delivery_date: date, data_root: Path) -> list[dic
 
     wind_solar = client.wind_and_solar_forecast(zone, day_start, day_end)
 
+    net_position = client.net_position(zone, day_start, day_end)
+    reference_prices = (
+        read_actual_day_ahead_prices(data_root, REFERENCE_ZONE, delivery_date, resolution=60)
+        if zone != REFERENCE_ZONE
+        else {}
+    )
+
     rows = []
     for period_start in sorted(actual):
         ts = pd.Timestamp(period_start, tz="Europe/Vienna")
@@ -98,8 +114,23 @@ def reconstruct_day(zone: str, delivery_date: date, data_root: Path) -> list[dic
             if column is not None and column in wind_solar.columns:
                 available_mw[asset.id] = _nearest(wind_solar[column], ts)
 
-        supply = build_supply_curve(assets, costs, available_mw=available_mw)
-        demand = DemandCurve(base_mw=_nearest(load_series, ts), reference_price_eur_mwh=actual[period_start])
+        hour_assets = list(assets)
+        hour_costs = dict(costs)
+        net_position_mw = _nearest(net_position, ts)
+        reference_price = reference_prices.get(period_start)
+
+        if reference_price is not None:
+            import_asset = import_supply_asset(zone, net_position_mw)
+            if import_asset is not None:
+                hour_assets.append(import_asset)
+                hour_costs[import_asset.id] = reference_price
+        # Missing reference price for this hour -> interconnector effect is
+        # skipped for it rather than guessed; net_position_mw is still
+        # reported below so the gap is visible, not silently absorbed.
+
+        demand_mw = _nearest(load_series, ts) + export_demand_mw(net_position_mw)
+        supply = build_supply_curve(hour_assets, hour_costs, available_mw=available_mw)
+        demand = DemandCurve(base_mw=demand_mw, reference_price_eur_mwh=actual[period_start])
         result = clear(supply, demand)
 
         rows.append({
@@ -109,6 +140,7 @@ def reconstruct_day(zone: str, delivery_date: date, data_root: Path) -> list[dic
             "price_error": result.price_eur_mwh - actual[period_start],
             "marginal_technology": result.marginal_technology,
             "demand_mw": demand.base_mw,
+            "net_position_mw": net_position_mw,
         })
     return rows
 
@@ -125,11 +157,11 @@ def main() -> None:
     errors = [r["price_error"] for r in rows]
     mae = sum(abs(e) for e in errors) / len(errors)
 
-    print(f"{'hour':>4}  {'estimated':>10}  {'actual':>8}  {'error':>8}  {'demand_mw':>10}  marginal")
+    print(f"{'hour':>4}  {'estimated':>10}  {'actual':>8}  {'error':>8}  {'demand_mw':>10}  {'net_pos':>8}  marginal")
     for r in rows:
         print(
             f"{r['hour']:>4}  {r['estimated_price']:>10.2f}  {r['actual_price']:>8.2f}  "
-            f"{r['price_error']:>8.2f}  {r['demand_mw']:>10.0f}  {r['marginal_technology']}"
+            f"{r['price_error']:>8.2f}  {r['demand_mw']:>10.0f}  {r['net_position_mw']:>8.0f}  {r['marginal_technology']}"
         )
     print(f"\nMAE: {mae:.2f} EUR/MWh over {len(rows)} hours (uncalibrated baseline, real ENTSO-E fleet/demand)")
 
