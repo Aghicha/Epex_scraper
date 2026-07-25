@@ -128,6 +128,31 @@ than mislabeling), `--settle-days`, `--market-areas`, `--products`, `--specs`,
 `--sleep`, `--proxies`, `--save-raw`, `--today`, `--log-level`.
 Run `python -m epex_scraper.scrape --help` for the full list.
 
+## Visualizing the data
+
+```bash
+python -m epex_scraper.dashboard --data-dir data --output dashboard.html --open
+```
+
+Builds a single self-contained `dashboard.html` from whatever CSVs are under
+`--data-dir` — no server, no build step. Pick a product (day-ahead,
+intraday-idaN, continuous), a resolution, and up to 8 market areas to
+overlay; it renders synced price and volume charts (Plotly, loaded from a
+CDN) with a date-range picker and a raw data table. Narrow what gets
+embedded with `--specs` / `--market-areas` (same syntax as `scrape.py`) if
+the full archive makes the page too large. The file is a build artifact —
+regenerate it after every scrape rather than committing it (it's
+gitignored).
+
+Note: a handful of scraped files record the wrong price column/currency for
+their market area (e.g. some `AT` day-ahead days show a continuous-style
+`Weight Avg (€/MWh)` schema instead of `Price`, and a few files across
+`AT`/`CH`/`SE2`/`SE4`/`GB` show `£` where `€` is expected, or vice versa).
+The dashboard surfaces whatever schema is in the most recent file for a
+given series rather than silently hiding the mismatch — see
+[`epex_scraper/parser.py`](epex_scraper/parser.py) if you want to track down
+the root cause.
+
 ## Diagnosing missing data (coverage)
 
 If a product/market yields no file, inspect one combination with the debug tool.
