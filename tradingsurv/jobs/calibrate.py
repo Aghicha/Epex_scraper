@@ -46,7 +46,7 @@ WATER_VALUE_QUANTILES = {RESERVOIR: 0.5, PUMPED_STORAGE: 0.75}
 MIN_OFFSET_SAMPLES = 3
 
 
-def _archived_dates(data_root: Path, zone: str) -> list[date]:
+def archived_dates(data_root: Path, zone: str) -> list[date]:
     """Dates with a *usable* archived file — some AT/CH/SE2/SE4/GB days
     record the wrong price schema (README.md's known scraper caveat); those
     files exist but read_actual_day_ahead_prices correctly returns {} for
@@ -67,7 +67,7 @@ def _archived_dates(data_root: Path, zone: str) -> list[date]:
 
 
 def run_calibration(zone: str, data_root: Path, validation_days: int) -> None:
-    dates = _archived_dates(data_root, zone)
+    dates = archived_dates(data_root, zone)
     if len(dates) <= validation_days:
         raise SystemExit(
             f"only {len(dates)} archived day(s) for {zone} under {data_root} — "
